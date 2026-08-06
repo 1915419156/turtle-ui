@@ -1,0 +1,78 @@
+{
+  "extends": "../deepseek-harness/tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../deepseek-harness/vendor/cordis"
+    },
+    {
+      "path": "../deepseek-harness/vendor/schemastery"
+    },
+    {
+      "path": "../deepseek-harness/packages/core/agent"
+    },
+    {
+      "path": "../deepseek-harness/packages/core/agent-loop"
+    },
+    {
+      "path": "../deepseek-harness/packages/goal/goal"
+    },
+    {
+      "path": "../deepseek-harness/packages/core/session"
+    },
+    {
+      "path": "../deepseek-harness/packages/context/session-reference"
+    },
+    {
+      "path": "../deepseek-harness/packages/session-persistence/session-persistence"
+    },
+    {
+      "path": "../deepseek-harness/packages/session-projection/session-projection"
+    },
+    {
+      "path": "../deepseek-harness/packages/session-projection/session-projection-cache"
+    },
+    {
+      "path": "../deepseek-harness/packages/session-query/session-query"
+    },
+    {
+      "path": "../deepseek-harness/packages/session-title/session-title"
+    },
+    {
+      "path": "../deepseek-harness/packages/llm/llm"
+    },
+    {
+      "path": "../deepseek-harness/packages/llm/token-meter"
+    },
+    {
+      "path": "../deepseek-harness/packages/llm/llm-retry"
+    },
+    {
+      "path": "../deepseek-harness/packages/core/tools"
+    },
+    {
+      "path": "../deepseek-harness/packages/ui/commands"
+    },
+    {
+      "path": "../deepseek-harness/packages/compact/compact"
+    },
+    {
+      "path": "../deepseek-harness/packages/skill/skill"
+    },
+    {
+      "path": "../deepseek-harness/packages/subprocess/subprocess"
+    },
+    {
+      "path": "../deepseek-harness/packages/ui/user-interaction"
+    },
+    {
+      "path": "../deepseek-harness/packages/support/invariants"
+    }
+  ]
+}
