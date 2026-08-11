@@ -10,6 +10,7 @@
  * @module @deepseek-ai/dsh-tui/startup
  */
 
+import { randomUUID } from 'node:crypto'
 import { Command } from 'commander'
 import type { Context } from '@deepseek-ai/cordis'
 import { parseCmdline } from '@deepseek-ai/dsh-cmdline'
@@ -46,12 +47,12 @@ function tuiCommand(): Command {
     .description('Open the interactive terminal UI on a fresh or persisted session.')
     .helpOption('-h, --help', 'show this help')
     .option('-r, --resume <session>', 'resume a persisted session by id instead of starting a fresh one')
-    .option('-s, --session <id>', 'the fresh session id to create (default: main)')
+    .option('-s, --session <id>', 'use an explicit id for the fresh session')
     .addHelpText('after', `
 Examples:
-  dsh --profile tui                       open the default "main" session
+  dsh --profile tui                       start a new session
   dsh --profile tui --resume <session>    continue a persisted session
-  dsh --profile tui --session review      start a second named session of your own
+  dsh --profile tui --session review      start a named fresh session
 `)
 }
 
@@ -71,9 +72,9 @@ function planTuiStartup(program: Command): TuiStartupValues {
   if (options.resume !== undefined && options.session !== undefined) {
     program.error('error: --resume continues an existing session and --session names one to create; pass only one')
   }
-  const selected = options.resume ?? options.session ?? 'main'
-  if (selected.trim() === '') program.error('error: the session id must not be empty')
-  const sessionId = SessionId(selected)
+  const selected = options.resume ?? options.session
+  if (selected?.trim() === '') program.error('error: the session id must not be empty')
+  const sessionId = SessionId(selected ?? `session-${randomUUID()}`)
   return options.resume === undefined ? { sessionId } : { resumeSessionId: sessionId }
 }
 

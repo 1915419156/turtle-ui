@@ -46,7 +46,7 @@ dsh --profile tui
 
 The `prepare` build (`tsdown.prepare.config.ts`) transpiles without type checking — the repo's type graph needs the sibling harness checkout, which consumers don't have. `pnpm run typecheck` in a sibling-checkout environment remains the type gate.
 
-The bundle layer rides over `@deepseek-ai/dsh-base` and binds the TUI and configured agent to one durable session. The ordinary `tui-startup` provider injects the launcher's immutable `ctx.cmdlineArgs`, parses `--resume`, `--session`, and this app's `--help`, then provides `tuiStartup`; session-bound rows inject that service and read it from lazy config, so they cannot activate on the wrong session. `dsh --profile tui --resume <session>` continues a persisted session, while `--session <id>` names one to create. In-app `/resume` handoff and exit-message behavior still need the removed TUI-specific launcher and remain unavailable.
+The bundle layer rides over `@deepseek-ai/dsh-base` and binds the TUI and configured agent to one durable session. The ordinary `tui-startup` provider injects the launcher's immutable `ctx.cmdlineArgs`, parses `--resume`, `--session`, and this app's `--help`, then provides `tuiStartup`; session-bound rows inject that service and read it from lazy config, so they cannot activate on the wrong session. A bare `dsh --profile tui` mints a fresh session id on every launch, `--session <id>` names a fresh session explicitly, and `--resume <session>` continues a persisted session. In-app `/resume` handoff and exit-message behavior still need the removed TUI-specific launcher and remain unavailable.
 
 ## Checks
 

@@ -94,10 +94,17 @@ describe('TUI command-line provider', () => {
     expect(observed.exits).toEqual([])
   })
 
-  it('defaults to main and accepts an explicitly named fresh session', async () => {
-    const defaultRun = await bootProvider([])
-    expect(defaultRun.values).toEqual({ sessionId: 'main' })
-    expect(defaultRun.observed.readerConfig).toEqual({ sessionId: 'main', resumeSessionId: undefined })
+  it('mints a fresh default identity and accepts an explicitly named fresh session', async () => {
+    const firstDefault = await bootProvider([])
+    const firstSessionId = firstDefault.values?.sessionId
+    expect(firstSessionId).toEqual(expect.any(String))
+    expect(firstDefault.observed.readerConfig).toEqual({
+      sessionId: firstSessionId,
+      resumeSessionId: undefined,
+    })
+
+    const secondDefault = await bootProvider([])
+    expect(secondDefault.values?.sessionId).not.toBe(firstSessionId)
 
     const namedRun = await bootProvider(['--session', 'review'])
     expect(namedRun.values).toEqual({ sessionId: 'review' })
