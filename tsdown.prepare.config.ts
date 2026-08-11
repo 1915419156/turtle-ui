@@ -7,7 +7,7 @@ import { defineConfig } from 'tsdown'
  * here — `pnpm run typecheck` owns that.
  */
 export default defineConfig({
-  entry: ['src/index.ts', 'src/invariant.ts', 'src/prompt.ts'],
+  entry: ['src/index.ts', 'src/invariant.ts', 'src/prompt.ts', 'src/startup.ts'],
   outDir: 'lib',
   format: ['esm'],
   platform: 'node',

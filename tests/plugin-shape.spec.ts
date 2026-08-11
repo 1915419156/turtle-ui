@@ -1,29 +1,52 @@
+import { spawnSync } from 'node:child_process'
+import { dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import Loader from '@cordisjs/plugin-loader'
-import * as tui from '../src/index.ts'
 
 /** Real Loader export-path guard for the namespace TUI plugin. */
 describe('dsh-tui plugin export shape', () => {
   it('preserves name, inject, Config, and apply through Loader unwrapping', () => {
-    expect('default' in tui).toBe(false)
-    expect(typeof tui.apply).toBe('function')
-
-    const loader = Object.create(Loader.prototype) as Loader
-    const unwrapped = loader.unwrapExports(tui) as Record<string, unknown>
-    expect(unwrapped).toBe(tui)
-    expect(unwrapped.name).toBe('ui-tui')
-    expect(unwrapped.inject).toEqual([
-      'agents',
-      'sessions',
-      'commands',
-      'userInteraction',
-      'tools',
-      'llm',
-      'systemPrompt',
-      'tokenMeter',
-      'tuiPrompt',
-    ])
-    expect(unwrapped.Config).toBeDefined()
-    expect(typeof unwrapped.apply).toBe('function')
+    // The sibling harness owns TypeScript source resolution for its private
+    // workspace packages. Probe through its source launcher so this external
+    // package never mixes harness source and built faces in Vite's program.
+    const root = dirname(dirname(fileURLToPath(import.meta.url)))
+    const tsx = fileURLToPath(new URL('../../deepseek-harness/node_modules/.bin/tsx', import.meta.url))
+    const script = `
+Promise.all([
+  import('./src/index.ts'),
+  import('../deepseek-harness/vendor/loader/src/index.ts'),
+]).then(([tui, loaderModule]) => {
+  const loader = Object.create(loaderModule.default.prototype)
+  const unwrapped = loader.unwrapExports(tui)
+  console.log(JSON.stringify({
+    same: unwrapped === tui,
+    hasDefault: 'default' in tui,
+    name: unwrapped.name,
+    inject: unwrapped.inject,
+    config: unwrapped.Config !== undefined,
+    apply: typeof unwrapped.apply,
+  }))
+})
+`
+    const result = spawnSync(tsx, ['--eval', script], { cwd: root, encoding: 'utf8' })
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout.trim())).toEqual({
+      same: true,
+      hasDefault: false,
+      name: 'ui-tui',
+      inject: [
+        'agents',
+        'sessions',
+        'commands',
+        'userInteraction',
+        'tools',
+        'llm',
+        'systemPrompt',
+        'tokenMeter',
+        'tuiPrompt',
+      ],
+      config: true,
+      apply: 'function',
+    })
   })
 })

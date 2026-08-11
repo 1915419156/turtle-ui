@@ -3,11 +3,17 @@
 # in a profile's `dsh.profile.bundles` list. Overrides base rows by id and inserts the
 # TUI front door plus its projection/storage support rows.
 
+# The ordinary tui-startup provider injects cmdlineArgs, owns --resume,
+# --session, and this app's --help, then provides tuiStartup. Session-bound
+# rows inject that service, so Loader resolves these expressions only after the
+# provider has parsed the invocation.
 - id: agent-loop
+  inject: [tuiStartup]
   config:
     agents:
       - id: main
-        sessionId: main
+        sessionId: !!js ctx.tuiStartup.sessionId
+        resumeSessionId: !!js ctx.tuiStartup.resumeSessionId
         provider: deepseek-official
         model: deepseek-v4-pro
         cwd: !!js process.cwd()
@@ -39,9 +45,6 @@
     - id: session-reference
       name: '@deepseek-ai/dsh-session-reference'
 
-    - id: session-projection
-      name: '@deepseek-ai/dsh-session-projection'
-
     - id: storage
       name: '@deepseek-ai/dsh-storage'
 
@@ -69,10 +72,14 @@
     - id: tui-prompt
       name: '@deepseek-ai/dsh-tui/prompt'
 
+    - id: tui-startup
+      name: '@deepseek-ai/dsh-tui/startup'
+
     - id: tui
       name: '@deepseek-ai/dsh-tui'
+      inject: [tuiStartup]
       config:
-        sessionId: main
+        sessionId: !!js ctx.tuiStartup.sessionId ?? ctx.tuiStartup.resumeSessionId
         showReasoning: true
         maxToolOutputLines: 6
 

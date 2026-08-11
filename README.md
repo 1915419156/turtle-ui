@@ -13,23 +13,25 @@ Keep this repository and DeepSeek Harness as siblings:
 ~/git/turtle-ui
 ```
 
-Install and build Turtle UI:
+Install and build the sibling Harness, then Turtle UI:
 
 ```sh
+(cd ../deepseek-harness && pnpm install && pnpm run build)
 pnpm install
 pnpm run build
 ```
 
-The peer APIs come from the sibling Harness checkout. The standalone TypeScript and Vitest configurations intentionally resolve those sources through `../deepseek-harness`. The patched `@earendil-works/pi-tui` is a devDependency bundled into `lib/` at build time, so consumers install no pi-tui and need no `patchedDependencies`.
+The peer APIs come from the sibling Harness checkout. The standalone TypeScript and Vitest configurations intentionally resolve those sources through `../deepseek-harness`; Vitest uses the Harness build for the goal host module instead of mixing that source module with transitive built packages. The patched `@earendil-works/pi-tui` is a devDependency bundled into `lib/` at build time, so consumers install no pi-tui and need no `patchedDependencies`.
 
 ## Run
 
 Turtle UI is a dsh profile bundle: its `package.json` declares `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`, so installing it into a profile activates the patch layer automatically.
 
-From a local checkout (the development loop — `link:` picks up rebuilds without reinstalling):
+From a local checkout, build and install a copied `file:` package so its Harness peers resolve through the profile's managed fallback. Re-run the add after rebuilding to refresh the copy:
 
 ```sh
-dsh plugin --profile tui add link:~/git/turtle-ui
+pnpm run build
+dsh plugin --profile tui add file:.
 dsh --profile tui
 ```
 
@@ -44,7 +46,7 @@ dsh --profile tui
 
 The `prepare` build (`tsdown.prepare.config.ts`) transpiles without type checking — the repo's type graph needs the sibling harness checkout, which consumers don't have. `pnpm run typecheck` in a sibling-checkout environment remains the type gate.
 
-The bundle layer rides over `@deepseek-ai/dsh-base` and binds the TUI and configured agent to the durable session id `main`. It does not restore the removed TUI-specific CLI launcher, so launcher-owned `/resume` handoff and exit-message behavior are unavailable.
+The bundle layer rides over `@deepseek-ai/dsh-base` and binds the TUI and configured agent to one durable session. The ordinary `tui-startup` provider injects the launcher's immutable `ctx.cmdlineArgs`, parses `--resume`, `--session`, and this app's `--help`, then provides `tuiStartup`; session-bound rows inject that service and read it from lazy config, so they cannot activate on the wrong session. `dsh --profile tui --resume <session>` continues a persisted session, while `--session <id>` names one to create. In-app `/resume` handoff and exit-message behavior still need the removed TUI-specific launcher and remain unavailable.
 
 ## Checks
 

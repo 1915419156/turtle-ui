@@ -3,9 +3,9 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import type { Context } from 'cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
-import { COMPACT_CHECKPOINT_SOURCE } from '@deepseek-ai/dsh-compact'
+import { compactCheckpointSource, CompactionId } from '@deepseek-ai/dsh-compact'
 import { createUserMessage, CallId, type ContentBlock , createMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm-retry'
 import { SessionId, type JsonValue, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -26,6 +26,7 @@ import { HeadlessTerminal, type TerminalSnapshotOptions } from './headless-termi
 import { TestSessionQueryService } from './session-query.ts'
 
 const SNAPSHOTS_DIR = join(dirname(fileURLToPath(import.meta.url)), 'snapshots')
+const COMPACT_CHECKPOINT_SOURCE = compactCheckpointSource(CompactionId('tui-snapshot-compaction'))
 const REFRESHING = process.env.DSH_SNAPSHOT === 'refresh'
 
 const CHECKPOINTS = [
@@ -337,7 +338,7 @@ describe('TUI terminal-state snapshots', () => {
     const harness = await setupSnapshot()
     await renderAfter(harness, () => {
       harness.agent.status = 'running'
-      harness.ctx.emit('agent/status', harness.agent, 'running')
+      agentEvents(harness.ctx, harness.agent).emit('agent/status', { status: 'running' })
       appendUser(harness.session, 'Show the live update.')
       clock += 1_000
       harness.session.append('assistant/chunk', {
@@ -476,7 +477,7 @@ describe('TUI terminal-state snapshots', () => {
       })
       harness.session.append('turn/end', {
         turn: 1,
-        reason: { kind: 'aborted' },
+        reason: { kind: 'aborted', reason: { kind: 'user' } },
       })
     })
     await checkpoint('retry-cancelled', harness.terminal, { includeScrollback: true })
@@ -743,7 +744,7 @@ describe('TUI terminal-state snapshots', () => {
         session.append('step/end', { turn: 1, step: 1 })
         session.append('turn/end', {
           turn: 1,
-          reason: { kind: 'error', step: 1, message: `Unsafe turn error ${CONTROL_PROBE}` },
+          reason: { kind: 'error', error: { message: `Unsafe turn error ${CONTROL_PROBE}`, code: 'UNKNOWN' } },
         })
       },
     }, { columns: 100, rows: 34 })
@@ -764,7 +765,11 @@ describe('TUI terminal-state snapshots', () => {
     })
     const rejected = expect(answer).rejects.toMatchObject({ code: 'ASK_ABORTED' })
     await harness.terminal.waitForFrame(beforeQuestion)
-    agentEvents(harness.ctx, harness.agent).emit('agent/error', 8, 3, new Error(`Unsafe live error ${CONTROL_PROBE}`))
+    agentEvents(harness.ctx, harness.agent).emit('agent/error', {
+      turn: 8,
+      step: 3,
+      error: new Error(`Unsafe live error ${CONTROL_PROBE}`),
+    })
     await checkpoint('untrusted-controls', harness.terminal, { includeScrollback: true })
 
     controller.abort()
@@ -913,20 +918,27 @@ describe('TUI terminal-state snapshots', () => {
       harness.terminal.send('\r')
       harness.terminal.send('/unknown-advanced-command')
       harness.terminal.send('\r')
-      agentEvents(harness.ctx, harness.agent).emit('agent/error', 1, 1, new Error('provider stream failed after partial output'))
+      agentEvents(harness.ctx, harness.agent).emit('agent/error', {
+        turn: 1,
+        step: 1,
+        error: new Error('provider stream failed after partial output'),
+      })
       harness.session.append('step/end', { turn: 1, step: 1 })
       harness.session.append('turn/end', {
         turn: 1,
-        reason: { kind: 'error', step: 1, message: 'provider stream failed after partial output' },
+        reason: { kind: 'error', error: { message: 'provider stream failed after partial output', code: 'UNKNOWN' } },
       })
-      harness.session.append('turn/start', { turn: 2, trigger: { kind: 'message', source: { kind: 'user' } } })
+      harness.session.append('turn/start', { turn: 2 })
       harness.session.append('turn/end', {
         turn: 2,
         reason: { kind: 'interrupted' },
       })
-      harness.session.append('turn/start', { turn: 3, trigger: { kind: 'message', source: { kind: 'user' } } })
-      harness.session.append('turn/end', { turn: 3, reason: { kind: 'disposed' } })
-      harness.session.append('turn/start', { turn: 4, trigger: { kind: 'message', source: { kind: 'user' } } })
+      harness.session.append('turn/start', { turn: 3 })
+      harness.session.append('turn/end', {
+        turn: 3,
+        reason: { kind: 'aborted', reason: { kind: 'disposed' } },
+      })
+      harness.session.append('turn/start', { turn: 4 })
       // A merge-extensible turn-end kind unknown to the TUI still surfaces its
       // name so the agent never stops without a visible reason.
       harness.session.append('turn/end', { turn: 4, reason: { kind: 'plugin-policy' } as never })
@@ -967,7 +979,7 @@ describe('TUI terminal-state snapshots', () => {
     const log = (meta: typeof earlier, title: string, day: string): { meta: typeof earlier; events: SessionEvent[] } => ({
       meta,
       events: [
-        { type: 'turn/start', seq: 0, time: Date.parse(`${day}T00:00:01Z`), data: { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } } },
+        { type: 'turn/start', seq: 0, time: Date.parse(`${day}T00:00:01Z`), data: { turn: 1 } },
         { type: 'user/message', seq: 1, time: Date.parse(`${day}T00:00:02Z`), data: createUserMessage({ content: [{ type: 'text', text: 'restore the selector' }], source: { kind: 'user' } }), surfaceOp: 'append' },
         { type: 'step/start', seq: 2, time: Date.parse(`${day}T00:00:03Z`), data: { turn: 1, step: 1 } },
         { type: 'request/header', seq: 3, time: Date.parse(`${day}T00:00:04Z`), data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-v4-pro' } }, reason: 'initial' } },

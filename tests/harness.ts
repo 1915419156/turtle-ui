@@ -1,12 +1,11 @@
 import { createUserMessage, MessageId , createMessage } from '@deepseek-ai/dsh-llm'
-import { Context } from 'cordis'
+import { Context } from '@deepseek-ai/cordis'
 import type { Terminal } from '@earendil-works/pi-tui'
 import AgentRegistry, {
   type Agent,
   type AgentCancelCause,
   type AgentOptions,
   type AgentStatus,
-  type SendOptions,
 } from '@deepseek-ai/dsh-agent'
 import type {
   ContentBlock,
@@ -27,7 +26,6 @@ interface FakeAgent extends Agent {
   status: AgentStatus
   sent: ContentBlock[][]
   sentMessages: UserMessage[]
-  sentOptions: (SendOptions | undefined)[]
   steered: ContentBlock[][]
   steeredIds: MessageId[]
   steeredOptions: UserMessage[]
@@ -38,8 +36,6 @@ interface FakeAgent extends Agent {
 
 export interface TuiHarnessOptions {
   status?: AgentStatus
-  /** Override the fake agent's next-step capability independently of status. */
-  acceptsNextStep?: boolean
   config?: Config
   /** Leave the session event log empty instead of seeding one turn and step. */
   omitInitialLifecycle?: boolean
@@ -178,10 +174,7 @@ export async function createTuiTestHarness<TerminalType extends Terminal, Exit e
     options.cwd === null ? undefined : { meta: { cwd: options.cwd ?? '/workspace' } },
   )
   if (options.omitInitialLifecycle !== true) {
-    session.append('turn/start', {
-      turn: 1,
-      trigger: { kind: 'message', source: { kind: 'user' } },
-    })
+    session.append('turn/start', { turn: 1 })
     session.append('step/start', { turn: 1, step: 1 })
   }
   options.beforeMount?.(session)
@@ -189,7 +182,6 @@ export async function createTuiTestHarness<TerminalType extends Terminal, Exit e
   const sentMessages: UserMessage[] = []
   const steered: ContentBlock[][] = []
   const steeredIds: MessageId[] = []
-  const sentOptions: (SendOptions | undefined)[] = []
   const steeredOptions: UserMessage[] = []
   const injected: ContentBlock[][] = []
   const injectedOptions: UserMessage[] = []
@@ -198,51 +190,42 @@ export async function createTuiTestHarness<TerminalType extends Terminal, Exit e
     id: sessionId,
     options: options.agentOptions ?? { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
     session,
+    inbox: {} as Agent['inbox'],
     status: options.status ?? 'idle',
-    get acceptsNextStep() {
-      return options.acceptsNextStep ?? this.status === 'running'
-    },
     ctx,
     sent,
     sentMessages,
-    sentOptions,
     steered,
     steeredIds,
     steeredOptions,
     injected,
     injectedOptions,
     cancelled,
-    send(input, options) {
+    send(input) {
       sent.push(input.content)
       sentMessages.push(input)
-      sentOptions.push(options)
-      return input.id
     },
-    updateInbox: () => 'not-found',
     followup(input) {
       sent.push(input.content)
       sentMessages.push(input)
-      sentOptions.push(undefined)
-      return input.id
     },
     steer(input) {
       steered.push(input.content)
       steeredOptions.push(input)
-      const id = input.id
-      steeredIds.push(id)
-      return { outcome: Promise.resolve({ status: 'admitted' as const, turn: 1, step: 1 }) }
+      steeredIds.push(input.id)
     },
     inject(input) {
       injected.push(input.content)
       injectedOptions.push(input)
-      return input.id
     },
-    reserveTurnAdmission: () => undefined,
     cancel(cause) {
       cancelled.push(cause)
     },
     whenIdle() {
       return Promise.resolve()
+    },
+    runMaintenance(task) {
+      return task(new AbortController().signal)
     },
   }
   ctx.agents.register(agent)

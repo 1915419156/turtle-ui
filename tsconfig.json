@@ -30,19 +30,19 @@
       "path": "../deepseek-harness/packages/context/session-reference"
     },
     {
-      "path": "../deepseek-harness/packages/session-persistence/session-persistence"
+      "path": "../deepseek-harness/packages/session/session-persistence"
     },
     {
-      "path": "../deepseek-harness/packages/session-projection/session-projection"
+      "path": "../deepseek-harness/packages/session/session-projection"
     },
     {
-      "path": "../deepseek-harness/packages/session-projection/session-projection-cache"
+      "path": "../deepseek-harness/packages/session/session-projection-cache"
     },
     {
       "path": "../deepseek-harness/packages/session-query/session-query"
     },
     {
-      "path": "../deepseek-harness/packages/session-title/session-title"
+      "path": "../deepseek-harness/packages/session/session-title"
     },
     {
       "path": "../deepseek-harness/packages/llm/llm"
@@ -57,7 +57,7 @@
       "path": "../deepseek-harness/packages/core/tools"
     },
     {
-      "path": "../deepseek-harness/packages/ui/commands"
+      "path": "../deepseek-harness/packages/interaction/commands"
     },
     {
       "path": "../deepseek-harness/packages/compact/compact"
@@ -69,10 +69,13 @@
       "path": "../deepseek-harness/packages/subprocess/subprocess"
     },
     {
-      "path": "../deepseek-harness/packages/ui/user-interaction"
+      "path": "../deepseek-harness/packages/interaction/user-interaction"
     },
     {
       "path": "../deepseek-harness/packages/support/invariants"
+    },
+    {
+      "path": "../deepseek-harness/packages/boot/cmdline"
     }
   ]
 }
