@@ -1,9 +1,12 @@
 import { fileURLToPath } from 'node:url'
 import tsconfigPaths from 'vite-tsconfig-paths'
 import { defineConfig } from 'vitest/config'
+import { standardDecoratorPlugin } from '../deepseek-harness/vitest.shared.ts'
 
 export default defineConfig({
-  plugins: [tsconfigPaths({
+  // Harness source uses standard TypeScript decorators, which Vite's default
+  // parser rejects; reuse the sibling checkout's pre-transform.
+  plugins: [standardDecoratorPlugin(), tsconfigPaths({
     projects: [
       './tsconfig.vitest.json',
       '../deepseek-harness/tsconfig.base.json',
