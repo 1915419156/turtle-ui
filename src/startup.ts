@@ -67,7 +67,7 @@ interface TuiOptions {
  * @param program - the parsed tui command.
  * @returns the session-bound rows' service value.
  */
-function planTuiStartup(program: Command): TuiStartupValues {
+function resolveTuiStartup(program: Command): TuiStartupValues {
   const options = program.opts<TuiOptions>()
   if (options.resume !== undefined && options.session !== undefined) {
     program.error('error: --resume continues an existing session and --session names one to create; pass only one')
@@ -79,11 +79,13 @@ function planTuiStartup(program: Command): TuiStartupValues {
 }
 
 /**
- * Resolve the session identity the rest of this app's rows read.
+ * Resolve the session identity the rest of this app's rows read. The
+ * command's action publishes the identity; conflicting or empty selectors are
+ * usage errors, so on rejection (and on `--help`) nothing is provided.
  * @param ctx - plugin context carrying the command line.
- * @returns nothing once the identity is provided, or when the command requested exit.
  */
 export function apply(ctx: Context): void {
-  const values = parseCmdline(ctx, tuiCommand(), planTuiStartup)
-  if (values !== undefined) ctx.provide(TUI_STARTUP_SERVICE, values)
+  const program = tuiCommand()
+  program.action(() => { ctx.provide(TUI_STARTUP_SERVICE, resolveTuiStartup(program)) })
+  parseCmdline(ctx, program)
 }
