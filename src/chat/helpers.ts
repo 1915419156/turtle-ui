@@ -15,7 +15,7 @@ import {
   truncateToWidth,
   visibleWidth,
 } from '@earendil-works/pi-tui'
-import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compact'
+import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import { isAppendSurfaceEvent, isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'

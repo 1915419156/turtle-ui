@@ -25,7 +25,7 @@ import {
 import type { LlmModelInfo, LlmModelReasoningInfo, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionRecord } from '@deepseek-ai/dsh-session-query'
-import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-interaction'
+import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
 import { BRACKETED_PASTE_END, BRACKETED_PASTE_START, displayText, sanitizePastedText } from './text.ts'
 import { dialogSelectTheme, type Palette } from './theme.ts'
 import type { ToolCardVisibility } from './transcript.ts'

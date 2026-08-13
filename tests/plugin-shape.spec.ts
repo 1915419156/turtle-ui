@@ -38,7 +38,7 @@ Promise.all([
         'agents',
         'sessions',
         'commands',
-        'userInteraction',
+        'userQuestions',
         'tools',
         'llm',
         'systemPrompt',

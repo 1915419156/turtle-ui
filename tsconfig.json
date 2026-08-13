@@ -60,7 +60,7 @@
       "path": "../deepseek-harness/packages/interaction/commands"
     },
     {
-      "path": "../deepseek-harness/packages/compact/compact"
+      "path": "../deepseek-harness/packages/compaction/compaction"
     },
     {
       "path": "../deepseek-harness/packages/skill/skill"
@@ -69,10 +69,10 @@
       "path": "../deepseek-harness/packages/subprocess/subprocess"
     },
     {
-      "path": "../deepseek-harness/packages/interaction/user-interaction"
+      "path": "../deepseek-harness/packages/interaction/user-questions"
     },
     {
-      "path": "../deepseek-harness/packages/support/invariants"
+      "path": "../deepseek-harness/packages/runtime-diagnostics/invariants"
     },
     {
       "path": "../deepseek-harness/packages/boot/cmdline"

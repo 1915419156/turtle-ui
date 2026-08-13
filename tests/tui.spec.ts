@@ -19,14 +19,14 @@ import { createUserMessage,
 } from '@deepseek-ai/dsh-llm'
 import { GOAL_CHANGE_VERSION, GoalId, type GoalSnapshotChangeMeta } from '@deepseek-ai/dsh-goal'
 import CommandService, { type CommandInvocation } from '@deepseek-ai/dsh-commands'
-import { compactCheckpointSource, CompactionId } from '@deepseek-ai/dsh-compact'
+import { compactCheckpointSource, CompactionId } from '@deepseek-ai/dsh-compaction'
 import SessionStore, { SessionId, type JsonValue, type Session, type SessionEvent, type SessionHeader, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import type { SessionRecord } from '@deepseek-ai/dsh-session-query'
-import SkillService, { type SkillCatalogSnapshot, type SkillDefinition, type SkillProvider, type SkillSummary } from '@deepseek-ai/dsh-skill'
+import SkillRegistry, { type SkillCatalogSnapshot, type SkillDefinition, type SkillProvider, type SkillSummary } from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-session-title'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import UserInteractionService from '@deepseek-ai/dsh-user-interaction'
-import SessionReferenceService, { formatSessionReferenceMention } from '@deepseek-ai/dsh-session-reference'
+import UserQuestionService from '@deepseek-ai/dsh-user-questions'
+import SessionReferenceResolver, { formatSessionReferenceMention } from '@deepseek-ai/dsh-session-reference'
 import type {} from '@deepseek-ai/dsh-llm-retry'
 import {
   createTuiChat,
@@ -51,7 +51,7 @@ import {
   type TuiHarnessOptions,
 } from './harness.ts'
 import { HeadlessTerminal } from './headless-terminal.ts'
-import { TestSessionQueryService } from './session-query.ts'
+import { TestSessionQueryEngine } from './session-query.ts'
 
 const UNUSED_TOOL_OUTPUT: ToolDefinition['output'] = {
   schema: { type: 'null' },
@@ -2307,7 +2307,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
     const result = await setup({ omitInitialLifecycle: true, now: () => clock })
     const idleWidth = promptWidth(result.terminal.output)
 
-    result.session.append('compact/start', { turn: null })
+    result.session.append('compaction/start', { turn: null })
     clock = 1_000
     result.terminal.output = ''
     await new Promise(resolve => setTimeout(resolve, 75))
@@ -2327,7 +2327,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
 
   it('ignores a numbered compaction bracket while the status line is idle', async () => {
     const result = await setup({ now: () => 1_000 })
-    result.session.append('compact/start', { turn: 1 })
+    result.session.append('compaction/start', { turn: 1 })
     await tick()
 
     expect(result.terminal.output).toContain('dsh > ')
@@ -2340,9 +2340,9 @@ describe('pi-tui chat lifecycle and transcript', () => {
     let clock = 0
     const result = await setup({ omitInitialLifecycle: true, now: () => clock })
     clock = 1_000
-    result.session.append('compact/start', { turn: null })
+    result.session.append('compaction/start', { turn: null })
     await tick()
-    result.session.append('compact/end', { turn: null })
+    result.session.append('compaction/end', { turn: null })
     await tick()
 
     clock = 2_000
@@ -2360,9 +2360,9 @@ describe('pi-tui chat lifecycle and transcript', () => {
 
   it('reports a failed standalone compaction when its live bracket closes', async () => {
     const result = await setup({ omitInitialLifecycle: true, now: () => 1_000 })
-    result.session.append('compact/start', { turn: null })
+    result.session.append('compaction/start', { turn: null })
     result.terminal.output = ''
-    result.session.append('compact/end', { turn: null, error: 'summary failed' })
+    result.session.append('compaction/end', { turn: null, error: 'summary failed' })
     await tick()
 
     expect(result.terminal.output).toContain('Compaction failed: summary failed')
@@ -2373,7 +2373,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
   it('preserves live compaction progress across an idle status edge', async () => {
     let clock = 0
     const result = await setup({ omitInitialLifecycle: true, now: () => clock })
-    result.session.append('compact/start', { turn: null })
+    result.session.append('compaction/start', { turn: null })
     clock = 1_000
     result.terminal.output = ''
     agentEvents(result.ctx, result.agent).emit('agent/status', { status: 'idle' })
@@ -2390,12 +2390,12 @@ describe('pi-tui chat lifecycle and transcript', () => {
     const result = await setup({ status: 'running', now: () => clock })
     clock = 1_000
     result.terminal.output = ''
-    result.session.append('compact/start', { turn: null })
+    result.session.append('compaction/start', { turn: null })
     await tick()
 
     expect(result.terminal.output).toContain('dsh ◍ ')
     expect(result.terminal.output).not.toContain('dsh ⊙ ')
-    result.session.append('compact/end', { turn: null })
+    result.session.append('compaction/end', { turn: null })
     await tick()
     result.terminal.output = ''
     result.terminal.resize(result.terminal.columns + 1)
@@ -2417,16 +2417,16 @@ describe('pi-tui chat lifecycle and transcript', () => {
       result = await setup({ omitInitialLifecycle: true, now: () => clock })
       intervalSpy.mockClear()
       clearIntervalSpy.mockClear()
-      result.session.append('compact/start', { turn: null })
+      result.session.append('compaction/start', { turn: null })
       clock = 1_000
-      result.session.append('compact/start', { turn: null })
+      result.session.append('compaction/start', { turn: null })
       await tick()
 
       expect(intervalSpy).toHaveBeenCalledOnce()
       expect(result.terminal.output).toContain('dsh ⊙ ')
       expect(result.terminal.progress.at(-1)).toBe(true)
 
-      result.session.append('compact/end', { turn: null })
+      result.session.append('compaction/end', { turn: null })
       await tick()
       expect(clearIntervalSpy).toHaveBeenCalledOnce()
       expect(result.terminal.progress.at(-1)).toBe(false)
@@ -2445,7 +2445,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
       omitInitialLifecycle: true,
       now: () => 1_000,
       beforeMount(session) {
-        session.append('compact/start', { turn: null })
+        session.append('compaction/start', { turn: null })
       },
     })
 
@@ -2465,7 +2465,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
       result = await setup({ omitInitialLifecycle: true, now: () => 1_000 })
       intervalSpy.mockClear()
       clearIntervalSpy.mockClear()
-      result.session.append('compact/start', { turn: null })
+      result.session.append('compaction/start', { turn: null })
       expect(intervalSpy).toHaveBeenCalledOnce()
 
       await dispose(result)
@@ -2940,7 +2940,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
     expect(result.terminal.output).toContain('[█████░░░░░░░░░░░] 33% used (42,000 / 128,000)')
     expect(result.terminal.output).toContain('2026-07-22 09:10:11 UTC')
     expect(result.terminal.output).toContain('System prompt')
-    expect(result.terminal.output).toContain('You are an AI agent powered by the DeepSeek Harness SDK.')
+    expect(result.terminal.output).toContain('You are an AI agent powered by DeepSeek Harness.')
     expect(result.terminal.output).toContain('Current instructions \\x1b]2;prompt-unsafe\\x07')
     expect(result.terminal.output).toContain('Registered tools')
     expect(result.terminal.output).toContain('read, write')
@@ -2979,7 +2979,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
     expect(result.terminal.output).toContain('n/a (0 read + 0 write)')
     expect(result.terminal.output).toContain('7 used · capacity unknown')
     expect(result.terminal.output).toContain('2026-07-22 10:11:12 UTC')
-    expect(result.terminal.output).toContain('You are an AI agent powered by the DeepSeek Harness SDK.')
+    expect(result.terminal.output).toContain('You are an AI agent powered by DeepSeek Harness.')
     expect(result.terminal.output).toContain('(none)')
     await dispose(result)
     dateNow.mockRestore()
@@ -3199,8 +3199,8 @@ describe('pi-tui chat lifecycle and transcript', () => {
       },
       async configureContext(ctx) {
         ctx.provide('tools', { get: () => undefined } as never)
-        await ctx.plugin(TestSessionQueryService)
-        await ctx.plugin(SessionReferenceService)
+        await ctx.plugin(TestSessionQueryEngine)
+        await ctx.plugin(SessionReferenceResolver)
       },
     })
 
@@ -3359,8 +3359,8 @@ describe('pi-tui chat lifecycle and transcript', () => {
     const result = await setup({
       async configureContext(ctx) {
         ctx.provide('tools', { get: () => undefined } as never)
-        await ctx.plugin(TestSessionQueryService)
-        await ctx.plugin(SessionReferenceService)
+        await ctx.plugin(TestSessionQueryEngine)
+        await ctx.plugin(SessionReferenceResolver)
         const source = ctx.sessions.create(unsafeId, { meta: { cwd: unsafeCwd, createdAt: 1 } })
         appendUser(source, 'safe background')
       },
@@ -3390,12 +3390,12 @@ describe('pi-tui chat lifecycle and transcript', () => {
     const result = await setup({
       async configureContext(ctx) {
         ctx.provide('tools', { get: () => undefined } as never)
-        await ctx.plugin(TestSessionQueryService)
-        await ctx.plugin(SessionReferenceService)
+        await ctx.plugin(TestSessionQueryEngine)
+        await ctx.plugin(SessionReferenceResolver)
       },
     })
-    const originalListCandidates = result.ctx.sessionReferences.listCandidates.bind(result.ctx.sessionReferences)
-    const listCandidates = vi.spyOn(result.ctx.sessionReferences, 'listCandidates')
+    const originalListCandidates = result.ctx.sessionReferenceResolver.listCandidates.bind(result.ctx.sessionReferenceResolver)
+    const listCandidates = vi.spyOn(result.ctx.sessionReferenceResolver, 'listCandidates')
 
     result.terminal.send('plain')
     result.terminal.send('\t')
@@ -3455,8 +3455,8 @@ describe('pi-tui chat lifecycle and transcript', () => {
     const result = await setup({
       async configureContext(ctx) {
         ctx.provide('tools', { get: () => undefined } as never)
-        await ctx.plugin(TestSessionQueryService)
-        await ctx.plugin(SessionReferenceService)
+        await ctx.plugin(TestSessionQueryEngine)
+        await ctx.plugin(SessionReferenceResolver)
       },
     })
     const missing = formatSessionReferenceMention({ sessionId: SessionId('missing'), label: 'Missing chat' })
@@ -3555,15 +3555,15 @@ describe('pi-tui chat lifecycle and transcript', () => {
     const result = await setup({
       async configureContext(ctx) {
         ctx.provide('tools', { get: () => undefined } as never)
-        await ctx.plugin(TestSessionQueryService)
-        await ctx.plugin(SessionReferenceService)
+        await ctx.plugin(TestSessionQueryEngine)
+        await ctx.plugin(SessionReferenceResolver)
         ctx.sessions.create(SessionId('source'))
       },
     })
     const mention = formatSessionReferenceMention({ sessionId: SessionId('source') })
     const value = `use ${mention}`
     let release: (() => void) | undefined
-    const prepare = vi.spyOn(result.ctx.sessionReferences, 'prepare').mockImplementation(
+    const prepare = vi.spyOn(result.ctx.sessionReferenceResolver, 'prepare').mockImplementation(
       (_agent, content) => new Promise((resolve) => {
         release = () => { resolve({ content }) }
       }),
@@ -3605,13 +3605,13 @@ describe('pi-tui chat lifecycle and transcript', () => {
     const lateSuccess = await setup({
       async configureContext(ctx) {
         ctx.provide('tools', { get: () => undefined } as never)
-        await ctx.plugin(TestSessionQueryService)
-        await ctx.plugin(SessionReferenceService)
+        await ctx.plugin(TestSessionQueryEngine)
+        await ctx.plugin(SessionReferenceResolver)
         ctx.sessions.create(SessionId('source'))
       },
     })
     let resolveAfterDispose: (() => void) | undefined
-    const latePrepare = vi.spyOn(lateSuccess.ctx.sessionReferences, 'prepare').mockImplementation(
+    const latePrepare = vi.spyOn(lateSuccess.ctx.sessionReferenceResolver, 'prepare').mockImplementation(
       (_agent, content) => new Promise((resolve) => {
         resolveAfterDispose = () => { resolve({ content }) }
       }),
@@ -4300,7 +4300,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
 describe('skill slash command', () => {
   const withSkills = async (ctx: Context): Promise<void> => {
     ctx.provide('tools', { get() { return undefined } } as never)
-    await ctx.plugin(SkillService)
+    await ctx.plugin(SkillRegistry)
     const skills = ctx.get('skills')
     if (skills === undefined) throw new Error('skills service not mounted')
     skills.register({ name: 'demo-skill', description: 'Demo skill for tests', source: 'runtime', provider: 'runtime', content: 'Demo instructions body.' })
@@ -4344,11 +4344,11 @@ describe('skill slash command', () => {
   })
 
   it('refreshes slash completions after runtime skill additions and complete removals', async () => {
-    let skills: SkillService | undefined
+    let skills: SkillRegistry | undefined
     const result = await setup({
       configureContext: async (ctx) => {
         ctx.provide('tools', { get() { return undefined } } as never)
-        await ctx.plugin(SkillService)
+        await ctx.plugin(SkillRegistry)
         skills = ctx.get('skills')
       },
     })
@@ -4378,14 +4378,14 @@ describe('skill slash command', () => {
   })
 
   it('retains last-good slash completions across incomplete snapshots', async () => {
-    let skills: SkillService | undefined
+    let skills: SkillRegistry | undefined
     let provider: SkillProvider | undefined
     let invalidate = (): void => {}
     let fail = false
     const result = await setup({
       configureContext: async (ctx) => {
         ctx.provide('tools', { get() { return undefined } } as never)
-        await ctx.plugin(SkillService)
+        await ctx.plugin(SkillRegistry)
         skills = ctx.get('skills')
         provider = {
           name: 'flaky-completion',
@@ -5577,12 +5577,12 @@ describe('tool cards and surface replay', () => {
   })
 })
 
-describe('TUI user-interaction dialogs', () => {
+describe('TUI user-questions dialogs', () => {
   it('limits the visible option window to maxQuestionOptions', async () => {
     const result = await setup({
       config: { maxQuestionOptions: 1, questionDialogWidth: 60, questionDialogMaxHeight: 20 },
     })
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{
         id: 'cap',
         question: 'Pick one',
@@ -5605,7 +5605,7 @@ describe('TUI user-interaction dialogs', () => {
       config: { questionDialogWidth: 40, questionDialogMaxHeight: 10 },
     })
     result.terminal.send('draft input')
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{
         id: 'placement',
         question: 'Pick one',
@@ -5629,7 +5629,7 @@ describe('TUI user-interaction dialogs', () => {
   it('answers single-select, multi-select, custom, and optionless questions', async () => {
     const result = await setup({ config: { maxQuestionOptions: 1 } })
 
-    const single = result.ctx.userInteraction.ask({
+    const single = result.ctx.userQuestions.ask({
       questions: [{
         id: 'mode', header: 'Mode', question: 'Choose a mode', detail: 'This choice controls the next turn.',
         options: [{ label: 'Safe', description: 'Use checks' }, { label: 'Fast' }],
@@ -5644,7 +5644,7 @@ describe('TUI user-interaction dialogs', () => {
     result.terminal.send('\r')
     await expect(single).resolves.toEqual({ answers: [{ id: 'mode', selected: ['Fast'] }] })
 
-    const multi = result.ctx.userInteraction.ask({
+    const multi = result.ctx.userQuestions.ask({
       questions: [{ id: 'targets', question: 'Pick targets', multiSelect: true, options: [{ label: 'Code' }, { label: 'Docs' }] }],
     })
     await tick()
@@ -5660,7 +5660,7 @@ describe('TUI user-interaction dialogs', () => {
       answers: [{ id: 'targets', selected: ['Code', 'Docs'], custom: 'Tests' }],
     })
 
-    const labelsOnly = result.ctx.userInteraction.ask({
+    const labelsOnly = result.ctx.userQuestions.ask({
       questions: [{
         id: 'labels-only',
         question: 'Pick one target',
@@ -5675,7 +5675,7 @@ describe('TUI user-interaction dialogs', () => {
       answers: [{ id: 'labels-only', selected: ['Code'] }],
     })
 
-    const custom = result.ctx.userInteraction.ask({
+    const custom = result.ctx.userQuestions.ask({
       questions: [{ id: 'other', question: 'Choose or type', options: [{ label: 'Default' }] }],
     })
     await tick()
@@ -5686,7 +5686,7 @@ describe('TUI user-interaction dialogs', () => {
     result.terminal.send('\r')
     await expect(custom).resolves.toEqual({ answers: [{ id: 'other', selected: [], custom: 'my choice' }] })
 
-    const free = result.ctx.userInteraction.ask({ questions: [{ id: 'note', question: 'Add a note' }] })
+    const free = result.ctx.userQuestions.ask({ questions: [{ id: 'note', question: 'Add a note' }] })
     await tick()
     result.terminal.send('\r')
     await tick()
@@ -5699,7 +5699,7 @@ describe('TUI user-interaction dialogs', () => {
 
   it('handles option wrapping, deselection errors, and returning from custom input', async () => {
     const result = await setup({ config: { theme: { color: true } } })
-    const single = result.ctx.userInteraction.ask({
+    const single = result.ctx.userQuestions.ask({
       questions: [{ id: 'single', question: 'Single options', options: [{ label: 'One' }, { label: 'Two' }] }],
     })
     const singleRejected = expect(single).rejects.toMatchObject({ code: 'ASK_ABORTED' })
@@ -5708,7 +5708,7 @@ describe('TUI user-interaction dialogs', () => {
     result.terminal.send('\x03')
     await singleRejected
 
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{
         id: 'options',
         question: 'Exercise options',
@@ -5753,7 +5753,7 @@ describe('TUI user-interaction dialogs', () => {
         maxQuestionOptions: 8,
       },
     })
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{
         id: 'scroll',
         question: 'Pick one',
@@ -5783,7 +5783,7 @@ describe('TUI user-interaction dialogs', () => {
     const result = await setup({
       config: { questionDialogWidth: 40, questionDialogMaxHeight: 10 },
     })
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{
         id: 'oversize',
         question: 'Pick one',
@@ -5815,7 +5815,7 @@ describe('TUI user-interaction dialogs', () => {
     const result = await setup({
       config: { questionDialogWidth: 20, questionDialogMaxHeight: 10 },
     })
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{
         id: 'long-detail',
         question: 'Approve this plan?',
@@ -5867,7 +5867,7 @@ describe('TUI user-interaction dialogs', () => {
     const result = await setup({
       config: { questionDialogWidth: 60, questionDialogMaxHeight: 8 },
     })
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{
         id: 'one-row',
         question: 'Pick one',
@@ -5896,7 +5896,7 @@ describe('TUI user-interaction dialogs', () => {
     const result = await setup({
       config: { questionDialogWidth: 60, questionDialogMaxHeight: 6 },
     })
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{
         id: 'minimum-options',
         question: 'Pick one',
@@ -5936,7 +5936,7 @@ describe('TUI user-interaction dialogs', () => {
     const result = await setup({
       config: { questionDialogWidth: 20, questionDialogMaxHeight: 6 },
     })
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{
         id: 'one-header-row',
         question: 'Plan?',
@@ -5962,7 +5962,7 @@ describe('TUI user-interaction dialogs', () => {
     result.terminal.send('\x03')
     await rejected
 
-    const single = result.ctx.userInteraction.ask({
+    const single = result.ctx.userQuestions.ask({
       questions: [{
         id: 'one-header-row-single',
         question: 'Plan?',
@@ -5982,7 +5982,7 @@ describe('TUI user-interaction dialogs', () => {
     result.terminal.send('\x03')
     await singleRejected
 
-    const compact = result.ctx.userInteraction.ask({
+    const compact = result.ctx.userQuestions.ask({
       questions: [{
         id: 'one-header-row-compact',
         question: 'Pick?',
@@ -6002,7 +6002,7 @@ describe('TUI user-interaction dialogs', () => {
     result.terminal.send('\x03')
     await compactRejected
 
-    const oneOption = result.ctx.userInteraction.ask({
+    const oneOption = result.ctx.userQuestions.ask({
       questions: [{
         id: 'one-header-row-one-option',
         question: 'Pick?',
@@ -6030,7 +6030,7 @@ describe('TUI user-interaction dialogs', () => {
         maxQuestionOptions: 8,
       },
     })
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{
         id: 'middle-scroll',
         question: 'Pick one',
@@ -6063,7 +6063,7 @@ describe('TUI user-interaction dialogs', () => {
   it('wraps a long option label across multiple lines instead of truncating it', async () => {
     const result = await setup({ config: { questionDialogWidth: 40 } })
     const longLabel = 'this is a very long option label that will not fit on one line in a narrow dialog'
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{
         id: 'long-label',
         question: 'Pick one',
@@ -6080,7 +6080,7 @@ describe('TUI user-interaction dialogs', () => {
 
   it('wraps fixed question chrome within the minimum dialog width', async () => {
     const result = await setup({ config: { questionDialogWidth: 20 } })
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{ id: 'narrow', question: 'Answer?' }],
     })
     const rejected = expect(answer).rejects.toMatchObject({ code: 'ASK_ABORTED' })
@@ -6098,7 +6098,7 @@ describe('TUI user-interaction dialogs', () => {
     const result = await setup({
       config: { questionDialogWidth: 20, questionDialogMaxHeight: 6 },
     })
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{ id: 'short-viewport', question: 'Answer this deliberately long question?' }],
     })
     const rejected = expect(answer).rejects.toMatchObject({ code: 'ASK_ABORTED' })
@@ -6119,7 +6119,7 @@ describe('TUI user-interaction dialogs', () => {
     const result = await setup({
       config: { questionDialogWidth: 20, questionDialogMaxHeight: 6 },
     })
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{
         id: 'compact-custom-options',
         question: 'Choose or type a deliberately long answer',
@@ -6143,7 +6143,7 @@ describe('TUI user-interaction dialogs', () => {
       config: { questionDialogWidth: 60, questionDialogMaxHeight: 6 },
     })
     result.terminal.resize(60, 2)
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{ id: 'one-row-dialog', question: 'Answer this deliberately long question?' }],
     })
     const rejected = expect(answer).rejects.toMatchObject({ code: 'ASK_ABORTED' })
@@ -6159,7 +6159,7 @@ describe('TUI user-interaction dialogs', () => {
       config: { questionDialogWidth: 60, questionDialogMaxHeight: 6 },
     })
     result.terminal.resize(60, 3)
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{ id: 'two-row-dialog', question: 'Answer this deliberately long question?' }],
     })
     const rejected = expect(answer).rejects.toMatchObject({ code: 'ASK_ABORTED' })
@@ -6175,7 +6175,7 @@ describe('TUI user-interaction dialogs', () => {
       config: { questionDialogWidth: 60, questionDialogMaxHeight: 6 },
     })
     result.terminal.resize(60, 4)
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{
         id: 'three-row-options',
         question: 'Pick one',
@@ -6196,7 +6196,7 @@ describe('TUI user-interaction dialogs', () => {
       config: { questionDialogWidth: 20 },
     })
     const beforeQuestion = terminal.frames
-    const answer = result.ctx.userInteraction.ask({
+    const answer = result.ctx.userQuestions.ask({
       questions: [{ id: 'narrow-viewport', question: 'Pick?', options: [{ label: 'Yes' }] }],
     })
     const rejected = expect(answer).rejects.toMatchObject({ code: 'ASK_ABORTED' })
@@ -6211,12 +6211,12 @@ describe('TUI user-interaction dialogs', () => {
     const result = await setup()
     const preAborted = new AbortController()
     preAborted.abort()
-    await expect(result.ctx.userInteraction.ask({
+    await expect(result.ctx.userQuestions.ask({
       questions: [{ id: 'pre-aborted', question: 'Already cancelled?' }],
       signal: preAborted.signal,
     })).rejects.toMatchObject({ code: 'ASK_ABORTED' })
 
-    const batch = result.ctx.userInteraction.ask({
+    const batch = result.ctx.userQuestions.ask({
       questions: [
         { id: 'first', question: 'First?', options: [{ label: 'Yes' }] },
         { id: 'second', question: 'Second?' },
@@ -6235,16 +6235,16 @@ describe('TUI user-interaction dialogs', () => {
       { id: 'second', selected: [], custom: 'done' },
     ] })
 
-    const cancelled = result.ctx.userInteraction.ask({ questions: [{ id: 'cancel', question: 'Cancel?' }] })
+    const cancelled = result.ctx.userQuestions.ask({ questions: [{ id: 'cancel', question: 'Cancel?' }] })
     const cancelledExpectation = expect(cancelled).rejects.toMatchObject({ code: 'ASK_ABORTED' })
     await tick()
     result.terminal.send('\x1b')
     await cancelledExpectation
 
     const controller = new AbortController()
-    const active = result.ctx.userInteraction.ask({ questions: [{ id: 'active', question: 'Active?' }], signal: controller.signal })
+    const active = result.ctx.userQuestions.ask({ questions: [{ id: 'active', question: 'Active?' }], signal: controller.signal })
     const queuedController = new AbortController()
-    const queued = result.ctx.userInteraction.ask({ questions: [{ id: 'queued', question: 'Queued?' }], signal: queuedController.signal })
+    const queued = result.ctx.userQuestions.ask({ questions: [{ id: 'queued', question: 'Queued?' }], signal: queuedController.signal })
     const activeExpectation = expect(active).rejects.toMatchObject({ code: 'ASK_ABORTED' })
     const queuedExpectation = expect(queued).rejects.toMatchObject({ code: 'ASK_ABORTED' })
     await tick()
@@ -6257,15 +6257,15 @@ describe('TUI user-interaction dialogs', () => {
 
   it('rejects active and queued dialogs on disposal', async () => {
     const result = await setup()
-    const active = result.ctx.userInteraction.ask({ questions: [{ id: 'active', question: 'Active?' }] })
-    const queued = result.ctx.userInteraction.ask({ questions: [{ id: 'queued', question: 'Queued?' }] })
+    const active = result.ctx.userQuestions.ask({ questions: [{ id: 'active', question: 'Active?' }] })
+    const queued = result.ctx.userQuestions.ask({ questions: [{ id: 'queued', question: 'Queued?' }] })
     const activeExpectation = expect(active).rejects.toMatchObject({ code: 'ASK_ABORTED' })
     const queuedExpectation = expect(queued).rejects.toMatchObject({ code: 'ASK_ABORTED' })
     await tick()
     await result.controller.dispose()
     await activeExpectation
     await queuedExpectation
-    await expect(result.ctx.userInteraction.ask({ questions: [{ id: 'late', question: 'Late?' }] }))
+    await expect(result.ctx.userQuestions.ask({ questions: [{ id: 'late', question: 'Late?' }] }))
       .rejects.toMatchObject({ code: 'NO_PROVIDER' })
     await result.ctx.fiber.dispose()
   })
@@ -6279,7 +6279,7 @@ describe('TUI user-interaction dialogs', () => {
         throw new Error('question setup failed')
       },
     }
-    const answer = result.ctx.userInteraction.ask({ questions: [broken] })
+    const answer = result.ctx.userQuestions.ask({ questions: [broken] })
     await expect(answer).rejects.toThrow('ask_user_question TUI failed: question setup failed')
     await tick()
     expect(result.terminal.output).toContain('TUI overlay failed: question setup failed')
@@ -6331,7 +6331,7 @@ describe('TUI extension service', () => {
     expect(sessions.map(session => session.state)).toEqual(['active', 'queued'])
     expect(hosts).toHaveLength(1)
 
-    const question = result.ctx.userInteraction.ask({
+    const question = result.ctx.userQuestions.ask({
       questions: [{ id: 'after-plugin', question: 'Question after plugins?', options: [{ label: 'Yes' }] }],
     })
     result.terminal.send('f')
@@ -6466,7 +6466,7 @@ describe('terminal mounting', () => {
     await ctx.plugin(SessionStore)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(CommandService)
-    await ctx.plugin(UserInteractionService)
+    await ctx.plugin(UserQuestionService)
     await ctx.plugin(TuiPromptService)
     ctx.provide('tools', { get: () => undefined } as never)
     const session = ctx.sessions.create(SessionId('main'))
@@ -6488,7 +6488,7 @@ describe('terminal mounting', () => {
     await ctx.plugin(SessionStore)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(CommandService)
-    await ctx.plugin(UserInteractionService)
+    await ctx.plugin(UserQuestionService)
     await ctx.plugin(TuiPromptService)
     ctx.provide('tools', { get: () => undefined } as never)
     const session = ctx.sessions.create(SessionId('main'))
@@ -6496,7 +6496,7 @@ describe('terminal mounting', () => {
     const terminal = new FakeTerminal()
     // Mirror dsh-tui's own inject (minus loader, the absence under test).
     await ctx.plugin({
-      inject: ['agents', 'commands', 'userInteraction', 'tools', 'llm', 'tokenMeter', 'tuiPrompt'],
+      inject: ['agents', 'commands', 'userQuestions', 'tools', 'llm', 'tokenMeter', 'tuiPrompt'],
       apply: (pluginCtx: Context) => {
         mountTui(pluginCtx, { theme: { color: false } }, { terminal, exit: vi.fn() })
       },
@@ -6516,7 +6516,7 @@ describe('terminal mounting', () => {
     await ctx.plugin(SessionStore)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(CommandService)
-    await ctx.plugin(UserInteractionService)
+    await ctx.plugin(UserQuestionService)
     await ctx.plugin(TuiPromptService)
     ctx.provide('tools', { get: () => undefined } as never)
     const terminal = new FakeTerminal()
@@ -6541,7 +6541,7 @@ describe('terminal mounting', () => {
     await ctx.plugin(SessionStore)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(CommandService)
-    await ctx.plugin(UserInteractionService)
+    await ctx.plugin(UserQuestionService)
     await ctx.plugin(TuiPromptService)
     ctx.provide('tools', { get: () => undefined } as never)
     const terminal = new FakeTerminal()
@@ -6571,7 +6571,7 @@ describe('terminal mounting', () => {
     await ctx.plugin(SessionStore)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(CommandService)
-    await ctx.plugin(UserInteractionService)
+    await ctx.plugin(UserQuestionService)
     await ctx.plugin(TuiPromptService)
     ctx.provide('tools', { get: () => undefined } as never)
     const terminal = new FakeTerminal()
@@ -6595,7 +6595,7 @@ describe('terminal mounting', () => {
     await ctx.plugin(SessionStore)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(CommandService)
-    await ctx.plugin(UserInteractionService)
+    await ctx.plugin(UserQuestionService)
     await ctx.plugin(TuiPromptService)
     ctx.provide('tools', { get: () => undefined } as never)
     const session = ctx.sessions.create(SessionId('failed-start-session'))
@@ -6612,7 +6612,7 @@ describe('terminal mounting', () => {
     expect(terminal.stopped).toBe(1)
     expect(terminal.progress).toEqual([false, true, false])
     expect(ctx.get('tui')).toBeUndefined()
-    await expect(ctx.userInteraction.ask({ questions: [{ id: 'late', question: 'Late?' }] }))
+    await expect(ctx.userQuestions.ask({ questions: [{ id: 'late', question: 'Late?' }] }))
       .rejects.toMatchObject({ code: 'NO_PROVIDER' })
     session.append('assistant/chunk', {
       turn: 1,
@@ -6629,7 +6629,7 @@ describe('terminal mounting', () => {
     provideTokenMeter(ctx)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(CommandService)
-    await ctx.plugin(UserInteractionService)
+    await ctx.plugin(UserQuestionService)
     await ctx.plugin(TuiPromptService)
     ctx.provide('tools', { get: () => undefined } as never)
     const runtime: TuiRuntime = { terminal: new FakeTerminal(), exit: vi.fn() }

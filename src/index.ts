@@ -1,7 +1,7 @@
 /**
  * Interactive pi-tui front door for DeepSeek Harness agents. It renders the
  * durable session transcript, drives one configured agent, and provides
- * keyboard-driven user-interaction dialogs without owning agent lifecycle.
+ * keyboard-driven user-questions dialogs without owning agent lifecycle.
  * @module @deepseek-ai/dsh-tui
  */
 
@@ -37,7 +37,6 @@ import type {} from '@deepseek-ai/dsh-llm-retry'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import {
   isReplacementSurfaceEvent,
-  lastActivityTime,
   SessionId,
   type SessionEvent,
   type UserMessage,
@@ -50,10 +49,10 @@ import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 // Type import also declaration-merges the optional `sessionPersistence`
 // service onto `Context` so `ctx.get('sessionPersistence')` is typed.
 import type {} from '@deepseek-ai/dsh-session-persistence'
-import type { SkillService } from '@deepseek-ai/dsh-skill'
-// Type import declaration-merges the `userInteraction` service onto `Context`;
+import type { SkillRegistry } from '@deepseek-ai/dsh-skill'
+// Type import declaration-merges the `userQuestions` service onto `Context`;
 // the ask-user-question queue is registered by ./chat/questions.
-import type {} from '@deepseek-ai/dsh-user-interaction'
+import type {} from '@deepseek-ai/dsh-user-questions'
 import {
   TuiExtensionServiceImpl,
   TuiOverlayManager,
@@ -262,7 +261,7 @@ export abstract class TuiExtensionService extends Service {
 }
 
 export const name = 'ui-tui'
-export const inject = ['agents', 'sessions', 'commands', 'userInteraction', 'tools', 'llm', 'systemPrompt', 'tokenMeter', 'tuiPrompt']
+export const inject = ['agents', 'sessions', 'commands', 'userQuestions', 'tools', 'llm', 'systemPrompt', 'tokenMeter', 'tuiPrompt']
 
 /** Model guidance for path-only file references selected through the TUI. */
 export const FILE_REFERENCE_PROMPT = 'Paths prefixed with @ are files explicitly referenced by the user. Use the read tool when their contents are needed; do not claim to have inspected a file before reading it.'
@@ -316,7 +315,7 @@ export interface TuiController {
 
 /**
  * Start the interactive pi-tui channel for an already-created target agent.
- * @param ctx - agent, tools, session-event, and user-interaction context.
+ * @param ctx - agent, tools, session-event, and user-questions context.
  * @param config - target agent, banner, and TUI presentation config.
  * @param runtime - terminal and process-exit boundary.
  * @returns lifecycle controller used by the Cordis effect disposer.
@@ -1214,7 +1213,8 @@ export function createTuiChat(
     const systemPrompt = displayText(renderPrompt(assembly)) || '(empty)'
     const registeredTools = assembly.tools.map(tool => displayText(tool.name)).join(', ') || '(none)'
     const events = agent.session.events
-    const latestActivity = lastActivityTime(events) ?? agent.session.header.createdAt
+    const latestActivity = events.findLast(event => event.type !== 'session/end-seed')?.time
+      ?? agent.session.header.createdAt
     const usedContext = Math.max(0, Math.round(ctx.tokenMeter.measure(agent.session).totalTokens))
     let context = `${formatDiagnosticNumber(usedContext)} used · capacity unknown`
     const contextWindow = modelController.contextWindow()
@@ -1290,11 +1290,11 @@ export function createTuiChat(
       ],
       agent.session.header.cwd ?? process.cwd(),
     )
-    const sessionReferences = ctx.get('sessionReferences')
+    const sessionReferenceResolver = ctx.get('sessionReferenceResolver')
     editor.setAutocompleteProvider(new ReferenceAutocompleteProvider(
       base,
       fileSearch,
-      sessionReferences,
+      sessionReferenceResolver,
       agent,
     ))
   }
@@ -1311,7 +1311,7 @@ export function createTuiChat(
   const disposeCommandChanges = ctx.on('commands/change', refreshCommandAutocomplete)
   refreshCommandAutocomplete()
 
-  const refreshSkillCommands = (service: SkillService): void => {
+  const refreshSkillCommands = (service: SkillRegistry): void => {
     const scan = ++skillCommandScan
     service.snapshot({ cwd, signal: skillAbort.signal }).then(
       (snapshot) => {
@@ -1593,8 +1593,8 @@ export function createTuiChat(
       dispatchMessage([{ type: 'text', text: parsed.text }])
       return
     }
-    const sessionReferences = ctx.get('sessionReferences')
-    if (sessionReferences === undefined) {
+    const sessionReferenceResolver = ctx.get('sessionReferenceResolver')
+    if (sessionReferenceResolver === undefined) {
       restoreSubmittedInput()
       appendNotice('Session reference capability unavailable.', 'error')
       return
@@ -1602,7 +1602,7 @@ export function createTuiChat(
     const controller = new AbortController()
     referenceControllers.add(controller)
     editor.disableSubmit = true
-    void sessionReferences.prepare(
+    void sessionReferenceResolver.prepare(
       agent,
       [{ type: 'text', text: parsed.text }],
       parsed.references,
@@ -1669,7 +1669,7 @@ export function createTuiChat(
     recordEventUsage(tokens, event)
     if (event.type === 'turn/start' && runningStatus !== undefined) runningStatus.turn = event.data.turn
     // Track live standalone compaction state.
-    if (event.type === 'compact/start' && event.data.turn === null) {
+    if (event.type === 'compaction/start' && event.data.turn === null) {
       if (compacting === undefined) {
         const startedAt = now()
         compacting = {
@@ -1681,7 +1681,7 @@ export function createTuiChat(
       requestRender()
       return
     }
-    if (event.type === 'compact/end' && event.data.turn === null && compacting !== undefined) {
+    if (event.type === 'compaction/end' && event.data.turn === null && compacting !== undefined) {
       const fadeOutGlyph = runningPhaseGlyph(agent.session.events, false, true)
       clearInterval(compacting.timer)
       compacting = undefined
@@ -1734,7 +1734,7 @@ export function createTuiChat(
     // TUI stays mounted. Retained agents accept deliveries after detachment, so
     // without this a later send would drive a zombie agent/session; mark
     // disposed so dispatchMessage reports it instead.
-    // The hard clear also retires live compaction. A later compact/end is
+    // The hard clear also retires live compaction. A later compaction/end is
     // intentionally presentation-silent: this disposal notice owns the
     // terminal outcome, and no animation may survive agent detachment.
     clearStatus()

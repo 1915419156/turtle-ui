@@ -53,7 +53,7 @@
     "@deepseek-ai/dsh-agent-loop": "^0.0.1",
     "@deepseek-ai/dsh-cmdline": "^0.0.1",
     "@deepseek-ai/dsh-commands": "^0.0.1",
-    "@deepseek-ai/dsh-compact": "^0.0.1",
+    "@deepseek-ai/dsh-compaction": "^0.0.1",
     "@deepseek-ai/dsh-goal": "^0.0.1",
     "@deepseek-ai/dsh-invariants": "^0.0.1",
     "@deepseek-ai/dsh-llm": "^0.0.1",
@@ -70,7 +70,7 @@
     "@deepseek-ai/dsh-system-prompt": "^0.0.1",
     "@deepseek-ai/dsh-token-meter": "^0.0.1",
     "@deepseek-ai/dsh-tools": "^0.0.1",
-    "@deepseek-ai/dsh-user-interaction": "^0.0.1",
+    "@deepseek-ai/dsh-user-questions": "^0.0.1",
     "@deepseek-ai/schemastery": "^3.18.0"
   },
   "peerDependenciesMeta": {

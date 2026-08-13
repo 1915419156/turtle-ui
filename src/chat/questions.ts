@@ -1,6 +1,6 @@
 /**
  * Ask-user-question sub-machine for the interactive chat channel. Registers the
- * user-interaction provider, presents one question overlay at a time in FIFO
+ * user-questions provider, presents one question overlay at a time in FIFO
  * order, and settles each request on answer, abort, overlay error, or channel
  * shutdown.
  * @module @deepseek-ai/dsh-tui/chat/questions
@@ -8,11 +8,11 @@
 
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import {
-  UserInteractionError,
+  UserQuestionError,
   type AskUserQuestionAnswer,
   type AskUserQuestionAnswerItem,
   type AskUserQuestionRequest,
-} from '@deepseek-ai/dsh-user-interaction'
+} from '@deepseek-ai/dsh-user-questions'
 import type { TuiOverlaySession } from '../extension/types.ts'
 import { QuestionDialog } from '../components/dialogs.ts'
 import type { ChatChannelDeps } from './channel.ts'
@@ -38,7 +38,7 @@ export interface QuestionQueueDeps extends ChatChannelDeps {
 export interface QuestionQueue {
   /** Reject the active and all queued questions (shutdown). */
   rejectAll(): void
-  /** Remove the user-interaction provider registration. */
+  /** Remove the user-questions provider registration. */
   unregister(): void
 }
 
@@ -60,7 +60,7 @@ export function createQuestionQueue(deps: QuestionQueueDeps): QuestionQueue {
     void pending.overlay?.close()
     pending.overlay = undefined
     removeAbortListener(pending)
-    pending.reject(new UserInteractionError(
+    pending.reject(new UserQuestionError(
       'ask_user_question was interrupted before the user answered',
       'ASK_ABORTED',
     ))
@@ -116,7 +116,7 @@ export function createQuestionQueue(deps: QuestionQueueDeps): QuestionQueue {
         if (result.reason !== 'error') return
         activeQuestion = undefined
         removeAbortListener(pending)
-        pending.reject(new UserInteractionError(
+        pending.reject(new UserQuestionError(
           `ask_user_question TUI failed: ${errorChain(result.error)}`,
           'ASK_ABORTED',
         ))
@@ -127,7 +127,7 @@ export function createQuestionQueue(deps: QuestionQueueDeps): QuestionQueue {
     show()
   }
 
-  const unregister = ctx.userInteraction.registerProvider({
+  const unregister = ctx.userQuestions.registerProvider({
     ask(request) {
       return new Promise<AskUserQuestionAnswer>((resolveAnswer, reject) => {
         const pending: PendingQuestion = {

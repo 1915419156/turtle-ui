@@ -10,11 +10,11 @@ import ToolRegistry from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import CommandService from '@deepseek-ai/dsh-commands'
-import UserInteractionService from '@deepseek-ai/dsh-user-interaction'
-import SessionReferenceService, { formatSessionReferenceMention } from '@deepseek-ai/dsh-session-reference'
+import UserQuestionService from '@deepseek-ai/dsh-user-questions'
+import SessionReferenceResolver, { formatSessionReferenceMention } from '@deepseek-ai/dsh-session-reference'
 import { createTuiChat, TuiPromptService } from '../src/index.ts'
 import { HeadlessTerminal } from './headless-terminal.ts'
-import { TestSessionQueryService } from './session-query.ts'
+import { TestSessionQueryEngine } from './session-query.ts'
 
 const EXPECTED = join(dirname(fileURLToPath(import.meta.url)), 'snapshots/session-reference.expected.txt')
 const REFRESHING = process.env.DSH_SNAPSHOT === 'refresh'
@@ -59,11 +59,11 @@ describe('TUI session-reference snapshot', () => {
     await ctx.plugin(ToolRegistry)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(CommandService)
-    await ctx.plugin(UserInteractionService)
+    await ctx.plugin(UserQuestionService)
     await ctx.plugin(TuiPromptService)
     await ctx.plugin(AgentLoop, { agents: [] })
-    await ctx.plugin(TestSessionQueryService)
-    await ctx.plugin(SessionReferenceService)
+    await ctx.plugin(TestSessionQueryEngine)
+    await ctx.plugin(SessionReferenceResolver)
 
     const adapter = new SnapshotAdapter()
     ctx.llm.registerAdapter(['mock'], adapter)
