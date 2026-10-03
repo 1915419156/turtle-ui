@@ -5,7 +5,6 @@
  * @module @deepseek-ai/dsh-tui/chat/resume
  */
 
-import { stat } from 'node:fs/promises'
 import type { TUI } from '@earendil-works/pi-tui'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import { errorChain } from '@deepseek-ai/dsh-llm'
@@ -99,50 +98,45 @@ export function createResumeController(deps: ResumeControllerDeps): ResumeContro
   })
 
   /**
-   * Metadata-only activity time: a live session's last in-memory event time,
-   * otherwise the persisted artifact's mtime. Never reads a log, so browsing
-   * cost stays independent of log size; any append (including bookkeeping)
-   * moves it.
+   * A live session's last in-memory event time; `undefined` for persisted
+   * rows. Persisted activity comes from the scan's title read instead (the
+   * title snapshot's `updatedAt`), so browsing costs one read per row with no
+   * separate log pass; a titleless log falls back to created-at.
    */
-  const lastActivityAt = async (record: SessionRecord): Promise<number | undefined> => {
-    const live = ctx.sessions.get(record.header.id)
-    if (live !== undefined) return live.events.at(-1)?.time
-    const location = ctx.get('sessionPersistence')?.locate(record.header)
-    if (location === undefined) return undefined
-    try {
-      return (await stat(location.path)).mtimeMs
-    } catch {
-      // Only a just-deleted or never-materialized artifact fails stat; the row falls back to created-at.
-      return undefined
-    }
-  }
+  const liveActivityAt = (record: SessionRecord): number | undefined =>
+    ctx.sessions.get(record.header.id)?.snapshotEvents().at(-1)?.time
 
   /**
    * One persisted row's title through the projection-cache ladder: the
-   * zero-I/O checkpoint row when usable, otherwise a cold read that folds
-   * only the log tail since the checkpoint and writes the refreshed row
-   * back — so a store scanned once serves later scans without log reads.
+   * zero-I/O checkpoint row when usable, otherwise a read of the stored log
+   * that folds the projections and writes the refreshed row back — so a store
+   * scanned once serves later scans from the checkpoint without another read.
    */
   const projectedTitle = async (
     cache: SessionProjectionCache,
+    listQuery: SessionQueryEngine,
     record: SessionRecord,
-    signal: AbortSignal,
   ): Promise<string | null | undefined> => {
     const live = ctx.sessions.get(record.header.id)
     if (live !== undefined) return ctx.get('sessionProjections')?.snapshot(live).values.title
     const cached = cache.cachedSnapshot(record.header)
     if (cached !== undefined && 'title' in cached.values) return cached.values.title
-    return (await cache.coldSnapshot(record.header.id, signal)).values.title
+    // Since 0.2.0 the cache never reads logs itself: the cold fold takes the
+    // complete log the caller supplies. `readSession` replay-validates, so a
+    // corrupt neighbor rejects and degrades its row instead of the whole scan.
+    const log = await listQuery.readSession(record.header.id)
+    return cache.coldSnapshot(log.session, log.inheritedEventCount, log.events).values.title
   }
 
-  /** One per-record title resolution: a title (absent for untitled) or an isolated failure. */
-  type TitleResolution = { title?: string; failure?: unknown }
+  /** One per-record resolution: a title with its activity time, or an isolated failure. */
+  type TitleResolution = { title?: string; activity?: number; failure?: unknown }
 
   /**
-   * Resolve every row's title without reading whole logs when the projection
-   * cache is mounted (live registry snapshot / checkpoint row / tail-only
-   * cold read, bounded by `resumeScanConcurrency`); a composition without
-   * the cache falls back to one bounded raw-log title batch.
+   * Resolve every row's title and activity time without reading whole logs when
+   * the projection cache is mounted (live registry snapshot / checkpoint row /
+   * full-log cold fold, bounded by `resumeScanConcurrency`); a composition
+   * without the cache falls back to one bounded raw-log title batch whose title
+   * snapshot carries the row's activity time (`updatedAt`).
    */
   const resolveTitles = async (
     listQuery: SessionQueryEngine,
@@ -158,7 +152,10 @@ export function createResumeController(deps: ResumeControllerDeps): ResumeContro
         if (result === undefined || result.sessionId !== record.header.id) throw new Error(`resume scan misaligned at "${record.header.id}"`)
         if (result.status === 'rejected') return { failure: result.reason }
         const title = result.value.title?.title
-        return title === undefined ? {} : { title }
+        const activity = result.value.title?.updatedAt
+        return title === undefined && activity === undefined
+          ? {}
+          : { ...(title === undefined ? {} : { title }), ...(activity === undefined ? {} : { activity }) }
       })
     }
     const resolutions = new Array<TitleResolution>(records.length)
@@ -170,7 +167,7 @@ export function createResumeController(deps: ResumeControllerDeps): ResumeContro
         cursor += 1
         const record = records[index] as SessionRecord
         try {
-          const value = await projectedTitle(cache, record, signal)
+          const value = await projectedTitle(cache, listQuery, record)
           resolutions[index] = typeof value === 'string' ? { title: value } : {}
         } catch (failure: unknown) {
           resolutions[index] = { failure }
@@ -336,18 +333,17 @@ export function createResumeController(deps: ResumeControllerDeps): ResumeContro
         // current-workspace/all-workspaces scope split over the whole set.
         const records = await listQuery.listSessions(scanAbort.signal)
         if (scanStale()) return
-        // Rows need only metadata, an mtime, and a title — resolved without
-        // whole-log reads when the projection cache is mounted. A corrupt
+        // Rows need only metadata, an activity time, and a title — resolved
+        // without whole-log reads when the projection cache is mounted (the
+        // title read doubles as the persisted activity source). A corrupt
         // neighbor degrades to one disabled row.
-        const [titles, activity] = await Promise.all([
-          resolveTitles(listQuery, records, scanAbort.signal),
-          Promise.all(records.map(record => lastActivityAt(record))),
-        ])
+        const resolutions = await resolveTitles(listQuery, records, scanAbort.signal)
         const candidates = records.map((record, index) => {
-          const resolution = titles[index] as TitleResolution
+          const resolution = resolutions[index] as TitleResolution
+          const activity = liveActivityAt(record) ?? resolution.activity
           return 'failure' in resolution
-            ? unreadableCandidate(record, activity[index], resolution.failure)
-            : summarize(record, resolution.title, activity[index])
+            ? unreadableCandidate(record, activity, resolution.failure)
+            : summarize(record, resolution.title, activity)
         })
         candidates.sort((a, b) => b.lastActivityAt - a.lastActivityAt
           || a.record.header.id.localeCompare(b.record.header.id))
@@ -356,10 +352,10 @@ export function createResumeController(deps: ResumeControllerDeps): ResumeContro
         picker?.setCandidates(candidates)
         deps.requestRender()
       }
-      // One catch covers listing, titles, and mtimes, so a scan failure
-      // cannot strand the overlay on its loading placeholder; an aborted
-      // scan's rejection stays silent because the user already dismissed the
-      // picker.
+      // One catch covers listing, titles, and activity resolution, so a scan
+      // failure cannot strand the overlay on its loading placeholder; an
+      // aborted scan's rejection stays silent because the user already
+      // dismissed the picker.
       void scanCandidates().catch((error: unknown) => {
         if (scanStale()) return
         void session.close()

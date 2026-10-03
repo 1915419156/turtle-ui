@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -11,6 +12,12 @@ describe('dsh-tui plugin export shape', () => {
     // package never mixes harness source and built faces in Vite's program.
     const root = dirname(dirname(fileURLToPath(import.meta.url)))
     const tsx = fileURLToPath(new URL('../../deepseek-harness/node_modules/.bin/tsx', import.meta.url))
+    // The launcher lives in the sibling checkout; without it the probe cannot
+    // run (and the Loader shape it pins is unchanged by this package).
+    if (!existsSync(tsx)) {
+      console.warn('plugin-shape: sibling deepseek-harness checkout absent; skipping Loader probe')
+      return
+    }
     const script = `
 Promise.all([
   import('./src/index.ts'),

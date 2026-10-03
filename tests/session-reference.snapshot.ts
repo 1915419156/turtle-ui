@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmService, { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk , createMessage } from '@deepseek-ai/dsh-llm'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
+import { compactCheckpointSource, CompactionId } from '@deepseek-ai/dsh-compaction'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
@@ -83,20 +84,21 @@ describe('TUI session-reference snapshot', () => {
           ...{ provider: 'mock', model: 'mock' },
         },
       }),
+      stream: [],
     }, { surfaceOp: 'append' })
     source.append('user/message', createUserMessage({
       content: [{ type: 'text', text: '<compacted-summary>Retained checkpoint.</compacted-summary>' }],
-      source: { kind: 'plugin', plugin: 'compact' },
+      source: compactCheckpointSource(CompactionId('session-reference-compact')),
     }), {
-      surfaceOp: { op: 'replace', start: oldUser.seq, end: oldAssistant.seq },
-      sourceEventSeqs: [oldUser.seq, oldAssistant.seq],
+      surfaceOp: { op: 'replace', startSeq: SessionSeq(oldUser.seq), endSeq: SessionSeq(oldAssistant.seq) },
+      sourceEventSeqs: [SessionSeq(oldUser.seq), SessionSeq(oldAssistant.seq)],
     })
     source.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'Recent retained question.' }],
       source: { kind: 'user' },
     }), { surfaceOp: 'append' })
 
-    const target = ctx.agentLoop.create(
+    const target = await ctx.agentLoop.create(
       SessionId('target-session'),
       { provider: 'mock', model: 'mock' },
       { cwd: '/workspace/project' },
@@ -124,13 +126,13 @@ describe('TUI session-reference snapshot', () => {
     expect(request).toContain('Recent retained question.')
     expect(request).not.toContain('SHADOWED OLD USER')
     expect(request).not.toContain('SHADOWED OLD ASSISTANT')
-    const context = target.session.events.find(event =>
+    const context = target.session.snapshotEvents().find(event =>
       event.type === 'user/message' && event.data.source.kind === 'session-reference')
     expect(context?.type === 'user/message' && context.data.source).toMatchObject({
       kind: 'session-reference',
       references: [{ sessionId: 'source-session', compacted: true }],
     })
-    const user = target.session.events.find(event =>
+    const user = target.session.snapshotEvents().find(event =>
       event.type === 'user/message' && event.data.source.kind === 'user')
     expect(user?.type === 'user/message' && user.data.content).toEqual([
       { type: 'text', text: 'Use @Source session' },

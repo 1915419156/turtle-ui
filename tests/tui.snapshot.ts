@@ -6,9 +6,11 @@ import { afterAll, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
 import { compactCheckpointSource, CompactionId } from '@deepseek-ai/dsh-compaction'
-import { createUserMessage, CallId, type ContentBlock , createMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ToolCallId, type ContentBlock , createMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm-retry'
-import { SessionId, type JsonValue, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { RetryId } from '@deepseek-ai/dsh-llm-retry'
+import { SESSION_FORMAT_VERSION, SessionId, SessionSeq, type Session, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import SessionReferenceResolver from '@deepseek-ai/dsh-session-reference'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry, { type ToolDefinition, type ToolResultView } from '@deepseek-ai/dsh-tools'
@@ -19,6 +21,7 @@ import {
   appendUser,
   createTuiTestHarness,
   disposeTuiTestHarness,
+  emitAssistantChunks,
   type TuiHarness,
   type TuiHarnessOptions,
 } from './harness.ts'
@@ -142,10 +145,13 @@ async function disposeSnapshot(harness: SnapshotHarness): Promise<void> {
 
 async function configureAdvancedTools(ctx: Context): Promise<void> {
   await ctx.plugin(SystemPrompt)
-  await ctx.plugin(ToolRegistry, { mode: 'code' })
+  // `code` was the 0.0.1 spelling; 0.2.0 presents the same run_code surface as
+  // `ptc`, which requires a PTC runtime whose language picks the SDK schema.
+  ctx.provide('ptcRuntime', { language: 'typescript' } as never)
   ctx.provide('workflows', { start() {} } as never)
+  await ctx.plugin(ToolRegistry, { mode: 'ptc' })
   await ctx.plugin(ToolWorkflow, { toolName: 'workflow', maxResultChars: 50_000 })
-  await ctx.plugin(ToolCordis, { vmTimeoutMs: 5_000 })
+  await ctx.plugin(ToolCordis)
 }
 
 interface ToolCallFixture {
@@ -157,7 +163,7 @@ interface ToolCallFixture {
 function appendToolCalls(session: Session, calls: readonly ToolCallFixture[]): void {
   appendAssistant(session, calls.map(call => ({
     type: 'tool-call',
-    id: CallId(call.id),
+    id: ToolCallId(call.id),
     name: call.name,
     arguments: JSON.stringify(call.arguments),
   })))
@@ -165,7 +171,7 @@ function appendToolCalls(session: Session, calls: readonly ToolCallFixture[]): v
     session.append('tool/call', {
       turn: 1,
       step: 1,
-      callId: CallId(call.id),
+      callId: ToolCallId(call.id),
       name: call.name,
       arguments: JSON.stringify(call.arguments),
     })
@@ -182,7 +188,7 @@ function appendToolResult(
     turn: 1,
     step: 1,
     message: createToolResultMessage({
-      callId: CallId(id),
+      callId: ToolCallId(id),
       content,
       isError: options.isError ?? false,
     }),
@@ -217,19 +223,20 @@ function appendPreCompactionLog(session: Session): CompactionRange {
     step: 1,
     message: createMessage({
       role: 'assistant',
-      content: [{ type: 'tool-call', id: CallId('old-tool'), name: 'bash', arguments: '{}' }],
+      content: [{ type: 'tool-call', id: ToolCallId('old-tool'), name: 'bash', arguments: '{}' }],
       source: {
         kind: 'model',
         ...{ provider: 'mock', model: 'deepseek-v4-flash' },
       },
     }),
+    stream: [],
   }, { surfaceOp: 'append' })
-  session.append('tool/call', { turn: 1, step: 1, callId: CallId('old-tool'), name: 'bash', arguments: '{}' })
+  session.append('tool/call', { turn: 1, step: 1, callId: ToolCallId('old-tool'), name: 'bash', arguments: '{}' })
   const result = session.append('tool/result', {
     turn: 1,
     step: 1,
     message: createToolResultMessage({
-      callId: CallId('old-tool'),
+      callId: ToolCallId('old-tool'),
       content: [{ type: 'text', text: 'shadowed step tool output' }],
       isError: false,
     }),
@@ -246,8 +253,8 @@ function appendCompactionCheckpoint(session: Session, range: CompactionRange): v
     }],
     source: COMPACT_CHECKPOINT_SOURCE,
   }), {
-    surfaceOp: { op: 'replace', start: range.start, end: range.end },
-    sourceEventSeqs: range.sources,
+    surfaceOp: { op: 'replace', startSeq: SessionSeq(range.start), endSeq: SessionSeq(range.end) },
+    sourceEventSeqs: range.sources.map(SessionSeq),
   })
 }
 
@@ -341,27 +348,20 @@ describe('TUI terminal-state snapshots', () => {
       agentEvents(harness.ctx, harness.agent).emit('agent/status', { status: 'running' })
       appendUser(harness.session, 'Show the live update.')
       clock += 1_000
-      harness.session.append('assistant/chunk', {
+      // rc.2: live chunks are `agent/assistant-stream` frames, not session
+      // events; the frame `time` values drive the same timing buckets the
+      // appended event times used to.
+      emitAssistantChunks(harness.ctx, harness.agent, {
         turn: 1,
         step: 1,
-        chunk: { type: 'block-start', index: 0, blockType: 'reasoning' },
-      })
-      harness.session.append('assistant/chunk', {
-        turn: 1,
-        step: 1,
-        chunk: { type: 'reasoning-delta', index: 0, text: 'Inspecting width and styles.' },
+        records: [
+          { time: clock, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+          { time: clock, chunk: { type: 'reasoning-delta', index: 0, text: 'Inspecting width and styles.' } },
+          { time: clock + 2_000, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
+          { time: clock + 2_000, chunk: { type: 'text-delta', index: 1, text: 'Streaming **visible state**…\n\n```ts\nconst visible = true\n```' } },
+        ],
       })
       clock += 2_000
-      harness.session.append('assistant/chunk', {
-        turn: 1,
-        step: 1,
-        chunk: { type: 'block-start', index: 1, blockType: 'text' },
-      })
-      harness.session.append('assistant/chunk', {
-        turn: 1,
-        step: 1,
-        chunk: { type: 'text-delta', index: 1, text: 'Streaming **visible state**…\n\n```ts\nconst visible = true\n```' },
-      })
     })
     await checkpoint('conversation-streaming', harness.terminal)
     await disposeSnapshot(harness)
@@ -374,16 +374,13 @@ describe('TUI terminal-state snapshots', () => {
     const harness = await setupSnapshot()
     await renderAfter(harness, () => {
       clock += 1_000
-      harness.session.append('assistant/chunk', {
+      emitAssistantChunks(harness.ctx, harness.agent, {
         turn: 1,
         step: 1,
-        chunk: { type: 'reasoning-delta', index: 0, text: 'Checking the result.' },
-      })
-      clock += 2_000
-      harness.session.append('assistant/chunk', {
-        turn: 1,
-        step: 1,
-        chunk: { type: 'text-delta', index: 1, text: 'The result is ready.' },
+        records: [
+          { time: clock, chunk: { type: 'reasoning-delta', index: 0, text: 'Checking the result.' } },
+          { time: clock + 2_000, chunk: { type: 'text-delta', index: 1, text: 'The result is ready.' } },
+        ],
       })
       clock += 3_000
       harness.session.append('step/end', { turn: 1, step: 1 })
@@ -409,10 +406,7 @@ describe('TUI terminal-state snapshots', () => {
         })
         session.append('step/end', { turn: 1, step: 1 })
         session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
-        session.append('turn/start', {
-          turn: 2,
-          trigger: { kind: 'message', source: { kind: 'user' } },
-        })
+        session.append('turn/start', { turn: 2 })
         appendUser(session, 'Next question.')
       },
     })
@@ -425,12 +419,15 @@ describe('TUI terminal-state snapshots', () => {
     const harness = await setupSnapshot()
     await renderAfter(harness, () => {
       appendUser(harness.session, 'Recover this request.')
-      harness.session.append('assistant/chunk', {
+      emitAssistantChunks(harness.ctx, harness.agent, {
         turn: 1,
         step: 1,
-        chunk: { type: 'text-delta', index: 0, text: 'discarded partial output' },
+        records: [
+          { time: Date.now(), chunk: { type: 'text-delta', index: 0, text: 'discarded partial output' } },
+        ],
       })
       harness.session.append('llm/retry', {
+        retryId: RetryId('retry-recover'),
         turn: 1,
         step: 1,
         provider: 'mock',
@@ -455,6 +452,7 @@ describe('TUI terminal-state snapshots', () => {
           ...{ provider: 'mock', model: 'deepseek-v4-flash' },
         },
       }),
+      stream: [],
     }, { surfaceOp: 'append' })
     harness.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
     await checkpoint('retry-recovered', harness.terminal, { includeScrollback: true })
@@ -466,6 +464,7 @@ describe('TUI terminal-state snapshots', () => {
     await renderAfter(harness, () => {
       appendUser(harness.session, 'Start then cancel.')
       harness.session.append('llm/retry', {
+        retryId: RetryId('retry-cancel'),
         turn: 1,
         step: 1,
         provider: 'mock',
@@ -488,17 +487,18 @@ describe('TUI terminal-state snapshots', () => {
     const harness = await setupSnapshot()
     await renderAfter(harness, () => {
       appendUser(harness.session, 'Let the bounded policy exhaust.')
-      harness.session.append('assistant/chunk', {
+      emitAssistantChunks(harness.ctx, harness.agent, {
         turn: 1,
         step: 3,
-        chunk: { type: 'text-delta', index: 0, text: 'discarded terminal partial output' },
+        records: [
+          { time: Date.now(), chunk: { type: 'text-delta', index: 0, text: 'discarded terminal partial output' } },
+        ],
       })
       harness.session.append('turn/end', {
         turn: 1,
         reason: {
           kind: 'error',
-          step: 3,
-          failure: { message: 'provider still unavailable', code: 'SERVER', status: 503 },
+          error: { message: 'provider still unavailable', code: 'SERVER', status: 503 },
         },
       })
     })
@@ -739,7 +739,10 @@ describe('TUI terminal-state snapshots', () => {
         })
         session.append('user/message', createUserMessage({
           content: [{ type: 'text', text: `Unsafe context ${CONTROL_PROBE}` }],
-          source: { kind: 'plugin', plugin: `unsafe-${CONTROL_PROBE}` },
+          // A replayed log is an untrusted boundary: the source may be a plugin
+          // kind the running harness never declared, which the card labels from
+          // its free-form `plugin` field.
+          source: { kind: 'plugin', plugin: `unsafe-${CONTROL_PROBE}` } as never,
         }), { surfaceOp: 'append' })
         session.append('step/end', { turn: 1, step: 1 })
         session.append('turn/end', {
@@ -974,26 +977,27 @@ describe('TUI terminal-state snapshots', () => {
 
   it('opens the searchable resume selector with log-backed session summaries', async () => {
     const dateNow = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-07-23T08:00:00.000Z'))
-    const earlier = { version: 0, id: SessionId('earlier-session'), createdAt: Date.parse('2024-01-01T00:00:00Z'), cwd: '/workspace/project' }
-    const elsewhere = { version: 0, id: SessionId('elsewhere-session'), createdAt: Date.parse('2024-02-02T00:00:00Z'), cwd: '/workspace/other' }
+    const earlier: SessionHeader = { version: SESSION_FORMAT_VERSION, id: SessionId('earlier-session'), createdAt: Date.parse('2024-01-01T00:00:00Z'), cwd: '/workspace/project', isSeeded: false }
+    const elsewhere: SessionHeader = { version: SESSION_FORMAT_VERSION, id: SessionId('elsewhere-session'), createdAt: Date.parse('2024-02-02T00:00:00Z'), cwd: '/workspace/other', isSeeded: false }
     const log = (meta: typeof earlier, title: string, day: string): { meta: typeof earlier; events: SessionEvent[] } => ({
       meta,
       events: [
-        { type: 'turn/start', seq: 0, time: Date.parse(`${day}T00:00:01Z`), data: { turn: 1 } },
-        { type: 'user/message', seq: 1, time: Date.parse(`${day}T00:00:02Z`), data: createUserMessage({ content: [{ type: 'text', text: 'restore the selector' }], source: { kind: 'user' } }), surfaceOp: 'append' },
-        { type: 'step/start', seq: 2, time: Date.parse(`${day}T00:00:03Z`), data: { turn: 1, step: 1 } },
-        { type: 'request/header', seq: 3, time: Date.parse(`${day}T00:00:04Z`), data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-v4-pro' } }, reason: 'initial' } },
-        { type: 'assistant/message', seq: 4, time: Date.parse(`${day}T00:00:05Z`), data: {
+        { type: 'turn/start', seq: SessionSeq(0), time: Date.parse(`${day}T00:00:01Z`), data: { turn: 1 } },
+        { type: 'user/message', seq: SessionSeq(1), time: Date.parse(`${day}T00:00:02Z`), data: createUserMessage({ content: [{ type: 'text', text: 'restore the selector' }], source: { kind: 'user' } }), surfaceOp: 'append' },
+        { type: 'step/start', seq: SessionSeq(2), time: Date.parse(`${day}T00:00:03Z`), data: { turn: 1, step: 1 } },
+        { type: 'request/header', seq: SessionSeq(3), time: Date.parse(`${day}T00:00:04Z`), data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-v4-pro' } }, reason: 'initial' } },
+        { type: 'assistant/message', seq: SessionSeq(4), time: Date.parse(`${day}T00:00:05Z`), data: {
           turn: 1, step: 1,
           message: createMessage({
             role: 'assistant',
             content: [{ type: 'text', text: 'ready' }],
             source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-v4-pro' },
           }),
+          stream: [],
         }, surfaceOp: 'append' },
-        { type: 'step/end', seq: 5, time: Date.parse(`${day}T00:00:06Z`), data: { turn: 1, step: 1 } },
-        { type: 'turn/end', seq: 6, time: Date.parse(`${day}T00:00:07Z`), data: { turn: 1, reason: { kind: 'completed' } } },
-        { type: 'session/title', seq: 7, time: Date.parse(`${day}T00:00:08Z`), data: { title, messageSeqs: [1], source: { kind: 'fallback' } } },
+        { type: 'step/end', seq: SessionSeq(5), time: Date.parse(`${day}T00:00:06Z`), data: { turn: 1, step: 1 } },
+        { type: 'turn/end', seq: SessionSeq(6), time: Date.parse(`${day}T00:00:07Z`), data: { turn: 1, reason: { kind: 'completed' } } },
+        { type: 'session/title', seq: SessionSeq(7), time: Date.parse(`${day}T00:00:08Z`), data: { title, messageSeqs: [SessionSeq(1)], source: { kind: 'fallback' } } },
       ],
     })
     const listGate = Promise.withResolvers<undefined>()
@@ -1068,13 +1072,13 @@ describe('TUI terminal-state snapshots', () => {
         session.append('tool/call', {
           turn: 1,
           step: 1,
-          callId: CallId('status-call'),
+          callId: ToolCallId('status-call'),
           name: 'read',
           arguments: '{"path":"README.md"}',
         })
         session.append('session/title', {
           title: 'Inspect session diagnostics',
-          messageSeqs: [1],
+          messageSeqs: [SessionSeq(1)],
           source: { kind: 'fallback' },
         })
         // Renders over a boundary-bearing log. It cannot pin the exclusion:

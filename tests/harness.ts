@@ -1,20 +1,34 @@
-import { createUserMessage, MessageId , createMessage } from '@deepseek-ai/dsh-llm'
+import {
+  createUserMessage,
+  LlmAttemptId,
+  MessageId,
+  createMessage,
+} from '@deepseek-ai/dsh-llm'
 import { Context } from '@deepseek-ai/cordis'
 import type { Terminal } from '@earendil-works/pi-tui'
 import AgentRegistry, {
+  agentEvents,
   type Agent,
   type AgentCancelCause,
   type AgentOptions,
   type AgentStatus,
+  type AssistantStreamFrame,
 } from '@deepseek-ai/dsh-agent'
 import type {
   ContentBlock,
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
+  StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import CommandService from '@deepseek-ai/dsh-commands'
-import SessionStore, { SessionId, type Session, type SessionHeader, type UserMessage } from '@deepseek-ai/dsh-session'
+import SessionStore, {
+  SessionId,
+  type Session,
+  type SessionEvent,
+  type SessionHeader,
+  type UserMessage,
+} from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry, { type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
@@ -24,12 +38,12 @@ import TuiPromptService from '../src/prompt.ts'
 
 interface FakeAgent extends Agent {
   status: AgentStatus
-  sent: ContentBlock[][]
+  sent: readonly (readonly ContentBlock[])[]
   sentMessages: UserMessage[]
-  steered: ContentBlock[][]
+  steered: readonly (readonly ContentBlock[])[]
   steeredIds: MessageId[]
   steeredOptions: UserMessage[]
-  injected: ContentBlock[][]
+  injected: readonly (readonly ContentBlock[])[]
   injectedOptions: UserMessage[]
   cancelled: AgentCancelCause[]
 }
@@ -61,12 +75,15 @@ export interface TuiHarnessOptions {
       model: string,
     ) => Promise<Pick<LlmResolvedModelInfo, 'context' | 'reasoning'>>
   }
-  /** Provide a fake `sessionPersistence` service so resume surfaces can list sessions. */
+  /**
+   * Provide a fake `sessionPersistence` service so resume surfaces can list
+   * sessions. The simplified test-side shape (`list`/`load`) is adapted to the
+   * rc.2 handle-based `SessionPersistence` contract in
+   * {@link adaptSessionPersistence}.
+   */
   sessionPersistence?: {
     list(): Promise<SessionHeader[]>
-    load?(id: ReturnType<typeof SessionId>): Promise<{ meta: SessionHeader; events: Session['events'] }>
-    /** Per-session artifact location for mtime-based activity; defaults to none. */
-    locate?(meta: SessionHeader): { kind: string; path: string } | undefined
+    load?(id: ReturnType<typeof SessionId>): Promise<{ meta: SessionHeader; events: readonly SessionEvent[] }>
   }
   handoffResume?: TuiRuntime['handoffResume']
   /** Host-supplied exit line; absent exercises the no-message path. */
@@ -151,19 +168,7 @@ export async function createTuiTestHarness<TerminalType extends Terminal, Exit e
   }
   if (ctx.get('systemPrompt') === undefined) await ctx.plugin(SystemPrompt)
   if (options.sessionPersistence !== undefined) {
-    const persistence = options.sessionPersistence
-    ctx.provide('sessionPersistence', {
-      ...persistence,
-      locate: (meta: SessionHeader) => persistence.locate?.(meta),
-      create: () => Promise.resolve(),
-      append: () => Promise.resolve(),
-      load: persistence.load === undefined
-        ? (id: ReturnType<typeof SessionId>) => Promise.reject(new Error(`session "${id}" not found`))
-        : (id: ReturnType<typeof SessionId>) => persistence.load!(id),
-      inspect: persistence.load === undefined
-        ? (id: ReturnType<typeof SessionId>) => Promise.reject(new Error(`session "${id}" not found`))
-        : (id: ReturnType<typeof SessionId>) => persistence.load!(id),
-    } as never)
+    ctx.provide('sessionPersistence', adaptSessionPersistence(options.sessionPersistence) as never)
   }
   if (options.mountSessionQuery !== false && ctx.get('sessionQuery') === undefined) {
     await ctx.plugin(TestSessionQueryEngine)
@@ -178,12 +183,12 @@ export async function createTuiTestHarness<TerminalType extends Terminal, Exit e
     session.append('step/start', { turn: 1, step: 1 })
   }
   options.beforeMount?.(session)
-  const sent: ContentBlock[][] = []
+  const sent: (readonly ContentBlock[])[] = []
   const sentMessages: UserMessage[] = []
-  const steered: ContentBlock[][] = []
+  const steered: (readonly ContentBlock[])[] = []
   const steeredIds: MessageId[] = []
   const steeredOptions: UserMessage[] = []
-  const injected: ContentBlock[][] = []
+  const injected: (readonly ContentBlock[])[] = []
   const injectedOptions: UserMessage[] = []
   const cancelled: AgentCancelCause[] = []
   const agent: FakeAgent = {
@@ -228,7 +233,7 @@ export async function createTuiTestHarness<TerminalType extends Terminal, Exit e
       return task(new AbortController().signal)
     },
   }
-  ctx.agents.register(agent)
+  await ctx.agents.register(agent)
   const controller = createTuiChat(ctx, Object.assign({
     ...options.omitWelcome === true ? {} : { welcome: 'Coding agent ready.' },
     sessionId,
@@ -264,6 +269,116 @@ export function appendUser(session: Session, text: string): void {
   }), { surfaceOp: 'append' })
 }
 
+/**
+ * Adapt the tests' simplified persistence fixture (`list`/`load`) to the rc.2
+ * handle-based `SessionPersistence` service shape consumed by the real
+ * `SessionQueryEngine`.
+ */
+function adaptSessionPersistence(fixture: NonNullable<TuiHarnessOptions['sessionPersistence']>) {
+  const identity = Symbol('test-session-persistence')
+  // rc.2 opens a log handle directly by id, so an open must not re-run the
+  // fixture's `list` (some fixtures make listing observable and return
+  // different records per call). The latest listing/stat observation only
+  // supplies the header for load-less fixtures.
+  let latest = new Map<string, SessionHeader>()
+  const remember = (headers: readonly SessionHeader[]): void => {
+    latest = new Map(headers.map(header => [String(header.id), header]))
+  }
+  const openHandle = async (id: ReturnType<typeof SessionId>) => {
+    const loaded = fixture.load === undefined ? undefined : await fixture.load(id)
+    const header = loaded?.meta ?? latest.get(String(id))
+    if (header === undefined) throw new Error(`session "${id}" not found`)
+    const events = loaded?.events ?? []
+    return {
+      id,
+      header,
+      inheritedEventCount: 0,
+      access: 'read' as const,
+      async read() {
+        return { eventState: 'detached' as const, events }
+      },
+      async append() {},
+      async flush() {},
+      async close() {},
+    }
+  }
+  return {
+    identity,
+    async create(header: SessionHeader) {
+      return {
+        id: header.id,
+        header,
+        inheritedEventCount: 0,
+        access: 'write' as const,
+        async read() {
+          return { eventState: 'detached' as const, events: [] as readonly SessionEvent[] }
+        },
+        async append() {},
+        async flush() {},
+        async close() {},
+      }
+    },
+    open: (id: ReturnType<typeof SessionId>) => openHandle(id),
+    async flush() {},
+    async stat(id: ReturnType<typeof SessionId>) {
+      const headers = await fixture.list()
+      remember(headers)
+      const header = headers.find(candidate => candidate.id === id)
+      return header === undefined ? undefined : { header, revision: Symbol() }
+    },
+    async list() {
+      const headers = await fixture.list()
+      remember(headers)
+      return headers.map(header => ({ header, revision: Symbol() }))
+    },
+  }
+}
+
+/** Emit one process-local live assistant-stream frame for an agent. */
+export function emitAssistantFrame(ctx: Context, agent: Agent, frame: AssistantStreamFrame): void {
+  agentEvents(ctx, agent).emit('agent/assistant-stream', { frame })
+}
+
+/** Parameters for the start-plus-chunks live-stream convenience helper. */
+export interface EmitAssistantChunksOptions {
+  turn: number
+  step: number
+  /** Timed chunks in dense order; frame indices are assigned from zero. */
+  records: readonly { time: number; chunk: StreamChunk }[]
+  attemptId?: LlmAttemptId
+}
+
+/**
+ * Emit one live attempt: the `start` frame followed by one `chunk` frame per
+ * record (dense indices from zero, revision 0). No `end` frame is emitted, so
+ * the step stays open until a later frame or durable settlement — matching the
+ * pre-rc.2 test scenarios that appended raw `assistant/chunk` events.
+ */
+export function emitAssistantChunks(
+  ctx: Context,
+  agent: Agent,
+  options: EmitAssistantChunksOptions,
+): void {
+  const attemptId = options.attemptId ?? LlmAttemptId('attempt-1')
+  emitAssistantFrame(ctx, agent, {
+    type: 'start',
+    attemptId,
+    revision: 0,
+    turn: options.turn,
+    step: options.step,
+  })
+  options.records.forEach((record, index) => {
+    emitAssistantFrame(ctx, agent, {
+      type: 'chunk',
+      attemptId,
+      revision: 0,
+      index,
+      time: record.time,
+      chunk: record.chunk,
+    })
+  })
+}
+
 /** Append a production-shaped assistant message to the active session surface. */
 export function appendAssistant(
   session: Session,
@@ -271,6 +386,15 @@ export function appendAssistant(
   usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number },
   position: { turn: number; step: number } = { turn: 1, step: 1 },
 ): void {
+  const now = Date.now()
+  // rc.2 embeds the attempt's compact stream record in the durable event. The
+  // settled content already lives in `message`; one block-start record per
+  // content block is enough for replay-side timing/phase reconstruction.
+  const stream = content.map((block, index) => ({
+    type: 'chunk' as const,
+    time: now + index,
+    chunk: { type: 'block-start' as const, index, blockType: block.type },
+  }))
   session.append('assistant/message', {
     ...position,
     message: createMessage({
@@ -278,6 +402,7 @@ export function appendAssistant(
       content,
       source: { kind: 'model', provider: 'mock', model: 'deepseek-v4-flash' },
     }),
+    stream,
     ...usage === undefined ? {} : { usage },
   }, { surfaceOp: 'append' })
 }

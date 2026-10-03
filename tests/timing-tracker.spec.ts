@@ -5,11 +5,23 @@ import { StepTimingTracker } from '../src/chat/timing.ts'
 /** One completed two-phase step plus a tool call, in event-log order. */
 function stepEvents(turn: number, step: number, base: number, seq: number): SessionEvent[] {
   return [
-    { type: 'step/start', seq: seq, time: base, data: { turn, step } },
-    { type: 'assistant/chunk', seq: seq + 1, time: base + 100, data: { turn, step, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } } },
-    { type: 'assistant/chunk', seq: seq + 2, time: base + 300, data: { turn, step, chunk: { type: 'text-delta', index: 1, text: 'hi' } } },
-    { type: 'tool/call', seq: seq + 3, time: base + 450, data: { turn, step, callId: 'call-1', name: 'bash', arguments: '{}' } },
-    { type: 'step/end', seq: seq + 4, time: base + 700, data: { turn, step } },
+    { type: 'step/start', seq, time: base, data: { turn, step } },
+    // rc.2 folds chunks into the durable attempt event's compact stream.
+    {
+      type: 'assistant/attempt',
+      seq: seq + 1,
+      time: base + 100,
+      data: {
+        turn,
+        step,
+        stream: [
+          { type: 'chunk', time: base + 100, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+          { type: 'chunk', time: base + 300, chunk: { type: 'text-delta', index: 1, text: 'hi' } },
+        ],
+      },
+    },
+    { type: 'tool/call', seq: seq + 2, time: base + 450, data: { turn, step, callId: 'call-1', name: 'bash', arguments: '{}' } },
+    { type: 'step/end', seq: seq + 3, time: base + 700, data: { turn, step } },
   ] as SessionEvent[]
 }
 
@@ -57,7 +69,18 @@ describe('StepTimingTracker', () => {
     const events = [
       { type: 'step/start', seq: 0, time: 1_000, data: { turn: 1, step: 1 } },
       { type: 'step/start', seq: 1, time: 1_100, data: { turn: 1, step: 2 } },
-      { type: 'assistant/chunk', seq: 2, time: 1_200, data: { turn: 1, step: 2, chunk: { type: 'text-delta', index: 0, text: 'x' } } },
+      {
+        type: 'assistant/attempt',
+        seq: 2,
+        time: 1_200,
+        data: {
+          turn: 1,
+          step: 2,
+          stream: [
+            { type: 'chunk', time: 1_200, chunk: { type: 'text-delta', index: 0, text: 'x' } },
+          ],
+        },
+      },
       { type: 'step/end', seq: 3, time: 1_500, data: { turn: 1, step: 2 } },
       { type: 'step/end', seq: 4, time: 1_600, data: { turn: 1, step: 1 } },
     ] as SessionEvent[]
@@ -78,10 +101,21 @@ describe('StepTimingTracker', () => {
     const tracker = new StepTimingTracker()
     const events = [
       ...stepEvents(1, 1, 1_000, 0),
-      // A stray duplicate start and a late chunk reuse the coordinates; the
+      // A stray duplicate start and a late attempt reuse the coordinates; the
       // closed step's totals stay pinned.
       { type: 'step/start', seq: 5, time: 9_000, data: { turn: 1, step: 1 } },
-      { type: 'assistant/chunk', seq: 6, time: 9_100, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'late' } } },
+      {
+        type: 'assistant/attempt',
+        seq: 6,
+        time: 9_100,
+        data: {
+          turn: 1,
+          step: 1,
+          stream: [
+            { type: 'chunk', time: 9_100, chunk: { type: 'text-delta', index: 0, text: 'late' } },
+          ],
+        },
+      },
     ] as SessionEvent[]
     expect(tracker.totalsAt(events, { turn: 1, step: 1 }, 10_000)).toEqual({
       ttft: 100, thinking: 200, responding: 150, tools: 250,

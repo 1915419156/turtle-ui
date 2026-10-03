@@ -50,9 +50,9 @@ export function recordTokenUsage(totals: SessionTokenTotals, turn: number, step:
  * @param event - Session event; ignored when it carries no usage.
  */
 export function recordEventUsage(totals: SessionTokenTotals, event: SessionEvent): void {
-  if (event.type === 'assistant/chunk' && event.data.chunk.type === 'usage') {
-    recordTokenUsage(totals, event.data.turn, event.data.step, event.data.chunk.usage)
-  } else if (event.type === 'assistant/message' && event.data.usage !== undefined) {
+  // Since 0.2.0 the usage travels on the settled `assistant/message` itself —
+  // there is no streamed `usage` chunk event to fold.
+  if (event.type === 'assistant/message' && event.data.usage !== undefined) {
     recordTokenUsage(totals, event.data.turn, event.data.step, event.data.usage)
   }
 }
@@ -77,7 +77,7 @@ export function cacheHitRate(totals: SessionTokenTotals): number | undefined {
  */
 export function sessionTokens(session: Session): SessionTokenTotals {
   const totals: SessionTokenTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, byStep: new Map() }
-  for (const event of session.events) {
+  for (const event of session.snapshotEvents()) {
     recordEventUsage(totals, event)
   }
   return totals

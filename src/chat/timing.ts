@@ -6,6 +6,8 @@
  * @module @deepseek-ai/dsh-tui/chat/timing
  */
 
+import { expandAssistantStream } from '@deepseek-ai/dsh-llm'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Palette } from '../components/theme.ts'
 
@@ -87,12 +89,6 @@ function timingState(startedAt?: number): TimingState {
   }
 }
 
-function sameStep(event: SessionEvent, position: StepPosition): boolean {
-  return typeof event.data === 'object'
-    && 'turn' in event.data && 'step' in event.data
-    && event.data.turn === position.turn && event.data.step === position.step
-}
-
 function closeTimingBucket(state: TimingState, at: number): void {
   if (state.active === undefined) return
   state.totals[state.active.bucket] += Math.max(0, at - state.active.since)
@@ -105,22 +101,19 @@ function enterTimingBucket(state: TimingState, bucket: TimingBucket | undefined,
   if (bucket !== undefined) state.active = { bucket, since: at }
 }
 
-function advanceStepTiming(
-  state: TimingState,
-  event: Extract<SessionEvent, { type: 'assistant/chunk' | 'tool/call' | 'step/end' }>,
-): void {
-  if (event.type === 'assistant/chunk') {
-    const chunk = event.data.chunk
-    if (state.active?.bucket === 'ttft') enterTimingBucket(state, undefined, event.time)
-    if (chunk.type === 'reasoning-delta' || (chunk.type === 'block-start' && chunk.blockType === 'reasoning')) {
-      enterTimingBucket(state, 'thinking', event.time)
-    } else if (chunk.type === 'text-delta' || (chunk.type === 'block-start' && chunk.blockType === 'text')) {
-      enterTimingBucket(state, 'responding', event.time)
-    }
-  } else if (event.type === 'tool/call') {
-    enterTimingBucket(state, 'tools', event.time)
-  } else {
-    closeTimingBucket(state, event.time)
+/**
+ * Fold one timed stream chunk into the step's timing state. The first token
+ * closes the model-wait bucket; reasoning and text deltas open their buckets.
+ * Since 0.2.0 chunks are not session events — they are embedded in the
+ * `assistant/message`/`assistant/attempt` events as compact stream records and
+ * expanded with `expandAssistantStream`.
+ */
+function advanceChunkTiming(state: TimingState, time: number, chunk: StreamChunk): void {
+  if (state.active?.bucket === 'ttft') enterTimingBucket(state, undefined, time)
+  if (chunk.type === 'reasoning-delta' || (chunk.type === 'block-start' && chunk.blockType === 'reasoning')) {
+    enterTimingBucket(state, 'thinking', time)
+  } else if (chunk.type === 'text-delta' || (chunk.type === 'block-start' && chunk.blockType === 'text')) {
+    enterTimingBucket(state, 'responding', time)
   }
 }
 
@@ -139,6 +132,13 @@ function stepKey(position: StepPosition): string {
 interface TrackedStep extends TimingState {
   /** Set at the step's `step/end`; later same-coordinate events no longer advance the step. */
   closed: boolean
+  /**
+   * Live stream chunks (`agent/assistant-stream`) already folded into this
+   * step. When set, the durable `assistant/message`/`assistant/attempt` stream
+   * is not expanded again — the live frames and the embedded record carry the
+   * exact same chunks.
+   */
+  liveFed: boolean
 }
 
 /**
@@ -172,17 +172,72 @@ export class StepTimingTracker {
       const event = events[this.scanned] as SessionEvent
       if (event.type === 'step/start') {
         const key = stepKey(event.data)
-        if (!this.steps.has(key)) this.steps.set(key, { ...timingState(event.time), closed: false })
-      } else if (event.type === 'assistant/chunk' || event.type === 'tool/call' || event.type === 'step/end') {
+        if (!this.steps.has(key)) {
+          this.steps.set(key, { ...timingState(event.time), closed: false, liveFed: false })
+        }
+      } else if (event.type === 'assistant/message' || event.type === 'assistant/attempt') {
+        const state = this.steps.get(stepKey(event.data))
+        if (state !== undefined && !state.closed && !state.liveFed) {
+          for (const { time, chunk } of expandAssistantStream(event.data.stream)) {
+            advanceChunkTiming(state, time, chunk)
+          }
+        }
+      } else if (event.type === 'tool/call' || event.type === 'step/end') {
         const state = this.steps.get(stepKey(event.data))
         if (state !== undefined && !state.closed) {
-          advanceStepTiming(state, event)
-          if (event.type === 'step/end') state.closed = true
+          if (event.type === 'tool/call') enterTimingBucket(state, 'tools', event.time)
+          else {
+            closeTimingBucket(state, event.time)
+            state.closed = true
+          }
         }
       }
     }
     const state = this.steps.get(stepKey(position))
     return state === undefined ? emptyTimingTotals() : timingTotalsAt(state, at)
+  }
+
+  /**
+   * Fold one live `agent/assistant-stream` chunk frame into its step. Live
+   * frames drive the open step's footer and status glyph before the durable
+   * `assistant/message` commits; the commit then skips re-expansion.
+   * @param position - Turn/step coordinates carried by the attempt's start frame.
+   * @param time - The chunk's original timestamp.
+   * @param chunk - The model stream chunk.
+   */
+  feedLiveChunk(position: StepPosition, time: number, chunk: StreamChunk): void {
+    const key = stepKey(position)
+    let state = this.steps.get(key)
+    if (state === undefined) {
+      state = { ...timingState(time), closed: false, liveFed: false }
+      this.steps.set(key, state)
+    }
+    if (state.closed) return
+    state.liveFed = true
+    advanceChunkTiming(state, time, chunk)
+  }
+
+  /**
+   * Scan appended events, then return the currently open step's active bucket,
+   * including buckets advanced by live stream frames. The open step is the last
+   * `step/start` with no later `step/end` inside an open turn.
+   * @param events - Current session event log (append-only).
+   * @returns The open step's active bucket, or `undefined` when no step is open.
+   */
+  openPhase(events: readonly SessionEvent[]): TimingBucket | undefined {
+    this.totalsAt(events, { turn: -1, step: -1 }, 0)
+    let open: StepPosition | undefined
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index] as SessionEvent
+      if (event.type === 'step/end') return undefined
+      if (event.type === 'step/start') {
+        open = event.data
+        break
+      }
+      if (event.type === 'turn/end') return undefined
+    }
+    if (open === undefined) return undefined
+    return this.steps.get(stepKey(open))?.active?.bucket
   }
 }
 
@@ -215,56 +270,23 @@ export const TIMING_BUCKET_GLYPHS: Record<TimingBucket, string> = {
 const COMPACTING_GLYPH = '⊙'
 
 /**
- * Derive the currently open step's active timing bucket, or `undefined` when no
- * step is open. The open step is the last `step/start` with no later matching
- * `step/end`; its bucket is replayed with the same rules as {@link StepTimingTracker}.
- * @param events - Session events to scan.
- * @returns The open step's active bucket, or `undefined`.
- */
-export function openStepPhase(events: readonly SessionEvent[]): TimingBucket | undefined {
-  let startIndex = -1
-  let start: Extract<SessionEvent, { type: 'step/start' }> | undefined
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index] as SessionEvent
-    if (event.type === 'step/end') return undefined
-    if (event.type === 'step/start') {
-      startIndex = index
-      start = event
-      break
-    }
-    if (event.type === 'turn/end') return undefined
-  }
-  if (start === undefined) return undefined
-  const position = start.data
-  const state = timingState(start.time)
-  for (let index = startIndex + 1; index < events.length; index += 1) {
-    const event = events[index] as SessionEvent
-    if ((event.type === 'assistant/chunk' || event.type === 'tool/call' || event.type === 'step/end')
-      && sameStep(event, position)) {
-      advanceStepTiming(state, event)
-    }
-  }
-  return state.active?.bucket
-}
-
-/**
  * The active status glyph, or `undefined` when idle. A running turn takes
  * precedence over standalone compaction and falls back to the pre-first-token
- * wait when no step is open. The caller applies the shared fade and throb
+ * wait when no step is open. The caller derives the live phase from
+ * {@link StepTimingTracker.openPhase} and applies the shared fade and throb
  * animation (see {@link fadeGlyph}).
- * @param events - Session events to derive the phase from.
+ * @param phase - The open step's active timing bucket, if any.
  * @param running - Whether the agent is currently running.
  * @param compacting - Whether a live standalone compaction bracket is open.
  * @returns The active status glyph, or `undefined` when idle.
  */
 export function runningPhaseGlyph(
-  events: readonly SessionEvent[],
+  phase: TimingBucket | undefined,
   running: boolean,
   compacting: boolean,
 ): string | undefined {
   if (running) {
-    const bucket = openStepPhase(events) ?? 'ttft'
-    return TIMING_BUCKET_GLYPHS[bucket]
+    return TIMING_BUCKET_GLYPHS[phase ?? 'ttft']
   }
   return compacting ? COMPACTING_GLYPH : undefined
 }

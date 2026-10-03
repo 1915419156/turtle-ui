@@ -1,25 +1,26 @@
 /**
- * Ask-user-question sub-machine for the interactive chat channel. Registers the
- * user-questions provider, presents one question overlay at a time in FIFO
- * order, and settles each request on answer, abort, overlay error, or channel
- * shutdown.
+ * Ask-user-question sub-machine for the interactive chat channel. Answers the
+ * agent-scoped `user-questions/request` waterfall, presents one question
+ * overlay at a time in FIFO order, and settles each request on answer, abort,
+ * overlay error, or channel shutdown.
  * @module @deepseek-ai/dsh-tui/chat/questions
  */
 
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import {
   UserQuestionError,
   type AskUserQuestionAnswer,
   type AskUserQuestionAnswerItem,
-  type AskUserQuestionRequest,
 } from '@deepseek-ai/dsh-user-questions'
+import type { AskUserQuestionRequestEvent } from '@deepseek-ai/dsh-user-questions/types'
 import type { TuiOverlaySession } from '../extension/types.ts'
 import { QuestionDialog } from '../components/dialogs.ts'
 import type { ChatChannelDeps } from './channel.ts'
 
 /** One queued or active ask-user-question request and its running answers. */
 interface PendingQuestion {
-  request: AskUserQuestionRequest
+  request: AskUserQuestionRequestEvent
   index: number
   answers: AskUserQuestionAnswerItem[]
   resolve(answer: AskUserQuestionAnswer): void
@@ -30,6 +31,8 @@ interface PendingQuestion {
 
 /** Collaborators the question queue needs from the chat channel. */
 export interface QuestionQueueDeps extends ChatChannelDeps {
+  /** The agent this terminal answers questions for; the waterfall is agent-scoped. */
+  readonly agent: Agent
   /** Current row budget after reserving the editor. */
   questionMaxHeight(): number
 }
@@ -48,7 +51,7 @@ export interface QuestionQueue {
  * @returns the controller used at shutdown to drain and unregister.
  */
 export function createQuestionQueue(deps: QuestionQueueDeps): QuestionQueue {
-  const { ctx, resolved, palette, overlayManager } = deps
+  const { resolved, palette, overlayManager } = deps
   const questionQueue: PendingQuestion[] = []
   let activeQuestion: PendingQuestion | undefined
 
@@ -127,34 +130,39 @@ export function createQuestionQueue(deps: QuestionQueueDeps): QuestionQueue {
     show()
   }
 
-  const unregister = ctx.userQuestions.registerProvider({
-    ask(request) {
-      return new Promise<AskUserQuestionAnswer>((resolveAnswer, reject) => {
-        const pending: PendingQuestion = {
-          request,
-          index: 0,
-          answers: [],
-          resolve: resolveAnswer,
-          reject,
-          overlay: undefined,
-          onAbort: () => {
-            if (activeQuestion === pending) {
-              activeQuestion = undefined
-              rejectQuestion(pending)
-              startNextQuestion()
-              return
-            }
-            // A non-active pending ask remains in the queue until this listener settles it.
-            questionQueue.splice(questionQueue.indexOf(pending), 1)
+  const claimRequest = (request: AskUserQuestionRequestEvent): Promise<AskUserQuestionAnswer> =>
+    new Promise<AskUserQuestionAnswer>((resolveAnswer, reject) => {
+      const pending: PendingQuestion = {
+        request,
+        index: 0,
+        answers: [],
+        resolve: resolveAnswer,
+        reject,
+        overlay: undefined,
+        onAbort: () => {
+          if (activeQuestion === pending) {
+            activeQuestion = undefined
             rejectQuestion(pending)
-          },
-        }
-        request.signal?.addEventListener('abort', pending.onAbort, { once: true })
-        questionQueue.push(pending)
-        startNextQuestion()
-      })
-    },
-  })
+            startNextQuestion()
+            return
+          }
+          // A non-active pending ask remains in the queue until this listener settles it.
+          questionQueue.splice(questionQueue.indexOf(pending), 1)
+          rejectQuestion(pending)
+        },
+      }
+      request.signal?.addEventListener('abort', pending.onAbort, { once: true })
+      questionQueue.push(pending)
+      startNextQuestion()
+    })
+
+  // 0.2.0 answers the agent-scoped `user-questions/request` waterfall instead of
+  // registering a provider on the service. The terminal always claims the
+  // request: returning the answer settles `ask()`, and a rejection (abort or
+  // overlay failure) fails it for the tool caller. The listener is registered
+  // on the agent scope, so disposal of the channel's agent-local effects
+  // unwinds it; `unregister` remains the early detach handle.
+  const unregister = deps.agent.ctx.on('user-questions/request', async (request, _next) => claimRequest(request))
 
   return {
     rejectAll(): void {

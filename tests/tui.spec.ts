@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -9,6 +9,7 @@ import AgentRegistry, {
 } from '@deepseek-ai/dsh-agent'
 import { createUserMessage,
   createToolResultMessage,
+  LlmAttemptId,
   LlmError,
   ReasoningEffortId,
   type LlmCallConfig,
@@ -20,14 +21,15 @@ import { createUserMessage,
 import { GOAL_CHANGE_VERSION, GoalId, type GoalSnapshotChangeMeta } from '@deepseek-ai/dsh-goal'
 import CommandService, { type CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { compactCheckpointSource, CompactionId } from '@deepseek-ai/dsh-compaction'
-import SessionStore, { SessionId, type JsonValue, type Session, type SessionEvent, type SessionHeader, type TurnEndReason } from '@deepseek-ai/dsh-session'
+import SessionStore, { SESSION_FORMAT_VERSION, SessionId, SessionSeq, type Session, type SessionEvent, type SessionHeader, type TurnEndReason } from '@deepseek-ai/dsh-session'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { SessionRecord } from '@deepseek-ai/dsh-session-query'
 import SkillRegistry, { type SkillCatalogSnapshot, type SkillDefinition, type SkillProvider, type SkillSummary } from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-session-title'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import SessionReferenceResolver, { formatSessionReferenceMention } from '@deepseek-ai/dsh-session-reference'
-import type {} from '@deepseek-ai/dsh-llm-retry'
+import { RetryId } from '@deepseek-ai/dsh-llm-retry'
 import {
   createTuiChat,
   disposeRootAndExit,
@@ -48,6 +50,7 @@ import {
   appendUser,
   createTuiTestHarness,
   disposeTuiTestHarness,
+  emitAssistantChunks,
   type TuiHarnessOptions,
 } from './harness.ts'
 import { HeadlessTerminal } from './headless-terminal.ts'
@@ -276,20 +279,20 @@ describe('TUI config', () => {
 
 describe('goodbye message and /resume', () => {
   const header = (id: string, createdAt: number, cwd: string): SessionHeader =>
-    ({ version: 0, id: SessionId(id), createdAt, cwd })
+    ({ version: SESSION_FORMAT_VERSION, id: SessionId(id), createdAt, cwd, isSeeded: false })
   const resumeEvents = (
     title: string,
     provider = 'deepseek-official',
     time = 100,
     reason: TurnEndReason = { kind: 'completed' },
   ): SessionEvent[] => [
-    { type: 'turn/start', seq: 0, time, data: { turn: 1 } },
-    { type: 'user/message', seq: 1, time: time + 1, data: createUserMessage({
+    { type: 'turn/start', seq: SessionSeq(0), time, data: { turn: 1 } },
+    { type: 'user/message', seq: SessionSeq(1), time: time + 1, data: createUserMessage({
       content: [{ type: 'text', text: 'resume me' }], source: { kind: 'user' },
     }), surfaceOp: 'append' },
-    { type: 'step/start', seq: 2, time: time + 2, data: { turn: 1, step: 1 } },
-    { type: 'request/header', seq: 3, time: time + 3, data: { header: { config: { provider, model: 'model-1' } }, reason: 'initial' } },
-    { type: 'assistant/message', seq: 4, time: time + 4, data: {
+    { type: 'step/start', seq: SessionSeq(2), time: time + 2, data: { turn: 1, step: 1 } },
+    { type: 'request/header', seq: SessionSeq(3), time: time + 3, data: { header: { config: { provider, model: 'model-1' } }, reason: 'initial' } },
+    { type: 'assistant/message', seq: SessionSeq(4), time: time + 4, data: {
       turn: 1, step: 1,
       message: createMessage({
         role: 'assistant',
@@ -299,10 +302,11 @@ describe('goodbye message and /resume', () => {
           ...{ provider, model: 'model-1' },
         },
       }),
+      stream: [],
     }, surfaceOp: 'append' },
-    { type: 'step/end', seq: 5, time: time + 5, data: { turn: 1, step: 1 } },
-    { type: 'turn/end', seq: 6, time: time + 6, data: { turn: 1, reason } },
-    { type: 'session/title', seq: 7, time: time + 7, data: { title, messageSeqs: [1], source: { kind: 'fallback' } } },
+    { type: 'step/end', seq: SessionSeq(5), time: time + 5, data: { turn: 1, step: 1 } },
+    { type: 'turn/end', seq: SessionSeq(6), time: time + 6, data: { turn: 1, reason } },
+    { type: 'session/title', seq: SessionSeq(7), time: time + 7, data: { title, messageSeqs: [SessionSeq(1)], source: { kind: 'fallback' } } },
   ]
   /** Derive the selector's batch title read from a fake per-session readSession. */
   const titlesViaReadSession = (
@@ -530,6 +534,13 @@ describe('goodbye message and /resume', () => {
             { header: untitled, live: false, persisted: true },
             { header: broken, live: false, persisted: true },
           ]),
+          // rc.2: the cache never reads logs itself; the cold fold takes the
+          // log this engine read (full replay via readSession).
+          readSession: (id: SessionId) => Promise.resolve({
+            session: [cachedRow, rowless, untitled, broken].find(candidate => candidate.id === id)!,
+            inheritedEventCount: 0,
+            events: [],
+          }),
           readTitleSnapshots: () => Promise.reject(new Error('the ladder must not scan logs')),
         } as never)
         ctx.provide('sessionProjections', {
@@ -542,9 +553,9 @@ describe('goodbye message and /resume', () => {
             if (meta.id === rowless.id) return { asOfSeq: 3, values: {} }
             return undefined
           },
-          coldSnapshot: async (id: SessionId) => {
+          coldSnapshot: (meta: SessionHeader) => {
             coldReads += 1
-            if (id === broken.id) throw new Error('checkpoint restore failed')
+            if (meta.id === broken.id) throw new Error('checkpoint restore failed')
             return { asOfSeq: 5, values: { title: 'Cold projected' } }
           },
         } as never)
@@ -586,25 +597,15 @@ describe('goodbye message and /resume', () => {
     await dispose(result)
   })
 
-  it('orders rows by artifact mtime without reading logs for the timestamp', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dsh-resume-mtime-'))
-    const stale = join(dir, 'stale.log')
-    const fresh = join(dir, 'fresh.log')
-    await writeFile(stale, 'x')
-    await writeFile(fresh, 'x')
-    await utimes(stale, new Date(1000), new Date(60_000))
-    await utimes(fresh, new Date(1000), new Date(120_000))
-    // Creation order contradicts mtime order, so the sort proves its source.
+  it('orders rows by last logged activity, falling back to created-at for empty logs', async () => {
+    // rc.2 dropped artifact-path metadata (`locate` + mtime): a persisted
+    // row's activity time is its log's last raw record time, and a log that
+    // yields nothing falls back to the header's creation time.
+    // Creation order contradicts activity order, so the sort proves its source.
     const createdLate = header('created-late-touched-early', 50, '/workspace')
     const createdEarly = header('created-early-touched-late', 40, '/workspace')
     const gone = header('artifact-gone', 30, '/workspace')
     const goneTwin = header('artifact-gone-twin', 30, '/workspace')
-    const paths = new Map([
-      [createdLate.id, stale],
-      [createdEarly.id, fresh],
-      [gone.id, join(dir, 'missing.log')],
-      [goneTwin.id, join(dir, 'missing-twin.log')],
-    ])
     const titles = new Map([
       [createdLate.id, 'Touched early'],
       [createdEarly.id, 'Touched late'],
@@ -615,11 +616,14 @@ describe('goodbye message and /resume', () => {
       cwd: '/workspace',
       sessionPersistence: {
         list: async () => [createdLate, createdEarly, gone, goneTwin],
-        load: async id => ({
-          meta: [createdLate, createdEarly, gone, goneTwin].find(target => target.id === id)!,
-          events: resumeEvents(titles.get(id)!),
-        }),
-        locate: meta => ({ kind: 'jsonl', path: paths.get(meta.id)! }),
+        load: async id => id === gone.id || id === goneTwin.id
+          ? { meta: [createdLate, createdEarly, gone, goneTwin].find(target => target.id === id)!, events: [] }
+          : {
+            meta: [createdLate, createdEarly, gone, goneTwin].find(target => target.id === id)!,
+            // The session/title event is the log's last record, so its time is
+            // the row's activity time: 120_000 sorts before 60_000.
+            events: resumeEvents(titles.get(id)!, 'deepseek-official', id === createdEarly.id ? 120_000 - 7 : 60_000 - 7),
+          },
       },
     })
     result.terminal.send('/resume')
@@ -632,7 +636,6 @@ describe('goodbye message and /resume', () => {
     // times tie-break by id.
     expect(rendered).toContain(new Date(gone.createdAt).toISOString())
     expect(rendered.indexOf('artifact-gone')).toBeLessThan(rendered.indexOf('artifact-gone-twin'))
-    await rm(dir, { recursive: true, force: true })
     await dispose(result)
   })
 
@@ -1129,7 +1132,7 @@ describe('goodbye message and /resume', () => {
     result.terminal.send('Racing corruption')
     result.terminal.send('\r')
     await tick(); await tick()
-    expect(result.terminal.output).toContain('Resume failed: session cannot be loaded: failed to inspect session')
+    expect(result.terminal.output).toContain('Resume failed: session cannot be loaded: failed to read stored session')
     expect(result.terminal.output).toContain('log changed during selection')
     expect(result.terminal.stopped).toBe(0)
     await dispose(result)
@@ -1592,7 +1595,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
       beforeMount(session) {
         session.append('session/title', {
           title: 'Restored session title',
-          messageSeqs: [1],
+          messageSeqs: [SessionSeq(1)],
           source: { kind: 'fallback' },
         })
       },
@@ -1604,7 +1607,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
 
     result.session.append('session/title', {
       title: 'Live title \u001B]0;unsafe\u0007',
-      messageSeqs: [1, 5],
+      messageSeqs: [SessionSeq(1), SessionSeq(5)],
       source: { kind: 'fallback' },
     })
     await tick()
@@ -1682,14 +1685,14 @@ describe('pi-tui chat lifecycle and transcript', () => {
     }), { surfaceOp: 'append' })
     result.session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: '<system-reminder>\nAdditional instructions from: nested/AGENTS.md\n\nRender XML context clearly.\n</system-reminder>' }],
-      source: { kind: 'plugin', plugin: 'workspace-context' },
+      source: { kind: 'plugin', plugin: 'workspace-context' } as never,
     }), { surfaceOp: 'append' })
     result.session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: '<system-reminder>&#155;</system-reminder>' }],
-      source: { kind: 'plugin', plugin: 'workspace-control-context' },
+      source: { kind: 'plugin', plugin: 'workspace-control-context' } as never,
     }), { surfaceOp: 'append' })
     result.session.append('user/message', createUserMessage({
-      content: [{ type: 'text', text: '' }], source: { kind: 'plugin', plugin: 'ctx' },
+      content: [{ type: 'text', text: '' }], source: { kind: 'plugin', plugin: 'ctx' } as never,
     }), { surfaceOp: 'append' })
     // A non-plugin injected source (goal) has no `plugin` field, so its context
     // card label falls back to the source kind.
@@ -1703,60 +1706,24 @@ describe('pi-tui chat lifecycle and transcript', () => {
     result.session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
     result.session.append('turn/start', { turn: 3 })
     result.session.append('step/start', { turn: 3, step: 1 })
-    result.session.append('assistant/chunk', {
+    // rc.2: live chunks are `agent/assistant-stream` frames; one burst carries
+    // the whole attempt so the accumulated blocks render as before.
+    emitAssistantChunks(result.ctx, result.agent, {
       turn: 3,
       step: 1,
-      chunk: { type: 'block-start', index: 0, blockType: 'reasoning' },
-    })
-    result.session.append('assistant/chunk', {
-      turn: 3,
-      step: 1,
-      chunk: { type: 'reasoning-delta', index: 0, text: 'live thought' },
-    })
-    result.session.append('assistant/chunk', {
-      turn: 3,
-      step: 1,
-      chunk: { type: 'reasoning-delta', index: 9, text: 'unannounced thought' },
-    })
-    result.session.append('assistant/chunk', {
-      turn: 3,
-      step: 1,
-      chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'live thought complete' } },
-    })
-    result.session.append('assistant/chunk', {
-      turn: 3,
-      step: 1,
-      chunk: { type: 'block-start', index: 1, blockType: 'text' },
-    })
-    result.session.append('assistant/chunk', {
-      turn: 3,
-      step: 1,
-      chunk: { type: 'text-delta', index: 1, text: 'live answer' },
-    })
-    result.session.append('assistant/chunk', {
-      turn: 3,
-      step: 1,
-      chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'live answer done' } },
-    })
-    result.session.append('assistant/chunk', {
-      turn: 3,
-      step: 1,
-      chunk: { type: 'block-start', index: 2, blockType: 'tool-call' },
-    })
-    result.session.append('assistant/chunk', {
-      turn: 3,
-      step: 1,
-      chunk: { type: 'block-end', index: 2, block: { type: 'tool-call', id: 'stream-tool' as never, name: 'tool', arguments: '{}' } },
-    })
-    result.session.append('assistant/chunk', {
-      turn: 3,
-      step: 1,
-      chunk: { type: 'tool-call-delta', index: 2, id: 'stream-tool' as never, argumentsDelta: '{}' },
-    })
-    result.session.append('assistant/chunk', {
-      turn: 3,
-      step: 1,
-      chunk: { type: 'usage', usage: { inputTokens: 1, outputTokens: 2 } },
+      records: [
+        { time: Date.now(), chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+        { time: Date.now(), chunk: { type: 'reasoning-delta', index: 0, text: 'live thought' } },
+        { time: Date.now(), chunk: { type: 'reasoning-delta', index: 9, text: 'unannounced thought' } },
+        { time: Date.now(), chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'live thought complete' } } },
+        { time: Date.now(), chunk: { type: 'block-start', index: 1, blockType: 'text' } },
+        { time: Date.now(), chunk: { type: 'text-delta', index: 1, text: 'live answer' } },
+        { time: Date.now(), chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'live answer done' } } },
+        { time: Date.now(), chunk: { type: 'block-start', index: 2, blockType: 'tool-call' } },
+        { time: Date.now(), chunk: { type: 'block-end', index: 2, block: { type: 'tool-call', id: 'stream-tool' as never, name: 'tool', arguments: '{}' } } },
+        { time: Date.now(), chunk: { type: 'tool-call-delta', index: 2, id: 'stream-tool' as never, argumentsDelta: '{}' } },
+        { time: Date.now(), chunk: { type: 'usage', usage: { inputTokens: 1, outputTokens: 2 } } },
+      ],
     })
     await tick()
     expect(result.terminal.output).toContain('live thought')
@@ -1790,10 +1757,12 @@ describe('pi-tui chat lifecycle and transcript', () => {
     expect(result.terminal.output).toContain('Turn cancelled')
     expect(result.terminal.progress).toContain(true)
 
-    result.session.append('assistant/chunk', {
+    emitAssistantChunks(result.ctx, result.agent, {
       turn: 3,
       step: 1,
-      chunk: { type: 'text-delta', index: 0, text: 'cleared stream' },
+      records: [
+        { time: Date.now(), chunk: { type: 'text-delta', index: 0, text: 'cleared stream' } },
+      ],
     })
     result.terminal.send('/clear')
     result.terminal.send('\r')
@@ -1820,7 +1789,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
     const instructions = Array.from({ length: 10 }, (_, index) => `instruction line ${index}`).join('\n')
     result.session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: `<system-reminder>\n${instructions}\n</system-reminder>` }],
-      source: { kind: 'plugin', plugin: 'workspace-context' },
+      source: { kind: 'plugin', plugin: 'workspace-context' } as never,
     }), { surfaceOp: 'append' })
     await tick()
 
@@ -1857,17 +1826,17 @@ describe('pi-tui chat lifecycle and transcript', () => {
     // wrapping nothing renders header-only.
     result.session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'plain reminder text, no tags' }],
-      source: { kind: 'plugin', plugin: 'plain-context' },
+      source: { kind: 'plugin', plugin: 'plain-context' } as never,
     }), { surfaceOp: 'append' })
     result.session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: '<system-reminder>\n</system-reminder>' }],
-      source: { kind: 'plugin', plugin: 'empty-context' },
+      source: { kind: 'plugin', plugin: 'empty-context' } as never,
     }), { surfaceOp: 'append' })
     // Only a matched open/close pair is a frame: an unpaired tag line is prose and
     // survives, so a body is never silently truncated by a tag-like first line.
     result.session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: '<available_skills>\nkept prose line\n</other-tag>' }],
-      source: { kind: 'plugin', plugin: 'unpaired-context' },
+      source: { kind: 'plugin', plugin: 'unpaired-context' } as never,
     }), { surfaceOp: 'append' })
     await tick()
     expect(result.terminal.output).toContain('Context · plain-context')
@@ -1893,7 +1862,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
         type: 'text',
         text: `<system-reminder>\nbadge: https://img.shields.io/badge/x?style=flat&logo=deepseek\npath: packages/<group>/<pkg>/\n${lines}\n</system-reminder>`,
       }],
-      source: { kind: 'plugin', plugin: 'prose-context' },
+      source: { kind: 'plugin', plugin: 'prose-context' } as never,
     }), { surfaceOp: 'append' })
     await tick()
 
@@ -1913,12 +1882,17 @@ describe('pi-tui chat lifecycle and transcript', () => {
 
   it('counts failed and recovered request usage once per step', async () => {
     const result = await setup()
-    result.session.append('assistant/chunk', {
-      turn: 1,
-      step: 1,
-      chunk: { type: 'usage', usage: { inputTokens: 10, outputTokens: 2 } },
-    })
+    // rc.2 carries usage on the settled assistant/message only — there are no
+    // usage chunk events. The failed step's usage is a settled message that the
+    // recovered step's message replaces in the per-turn/step accounting.
+    appendAssistant(
+      result.session,
+      [],
+      { inputTokens: 10, outputTokens: 2 },
+      { turn: 1, step: 1 },
+    )
     result.session.append('llm/retry', {
+      retryId: RetryId('retry-usage'),
       turn: 1,
       step: 1,
       provider: 'mock',
@@ -1928,11 +1902,6 @@ describe('pi-tui chat lifecycle and transcript', () => {
       maxRetries: 2,
       delayMs: 500,
       failure: { message: 'temporary', code: 'SERVER' },
-    })
-    result.session.append('assistant/chunk', {
-      turn: 1,
-      step: 2,
-      chunk: { type: 'usage', usage: { inputTokens: 7, outputTokens: 3 } },
     })
     appendAssistant(
       result.session,
@@ -1948,13 +1917,16 @@ describe('pi-tui chat lifecycle and transcript', () => {
 
   it('retracts a failed live stream and renders its durable retry status', async () => {
     const result = await setup()
-    result.session.append('assistant/chunk', {
+    emitAssistantChunks(result.ctx, result.agent, {
       turn: 1,
       step: 1,
-      chunk: { type: 'text-delta', index: 0, text: 'discarded partial answer' },
+      records: [
+        { time: Date.now(), chunk: { type: 'text-delta', index: 0, text: 'discarded partial answer' } },
+      ],
     })
     result.session.append('step/end', { turn: 1, step: 1 })
     result.session.append('llm/retry', {
+      retryId: RetryId('retry-1'),
       turn: 1,
       step: 1,
       provider: 'mock',
@@ -1966,6 +1938,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
       failure: { message: 'rate limited', code: 'RATE_LIMIT', status: 429 },
     })
     result.session.append('llm/retry', {
+      retryId: RetryId('retry-2'),
       turn: 1,
       step: 2,
       provider: 'mock',
@@ -1977,6 +1950,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
       failure: { message: 'failed before chunks', code: 'SERVER', status: 503 },
     })
     result.session.append('llm/retry', {
+      retryId: RetryId('retry-3'),
       turn: 1,
       step: 3,
       provider: 'mock',
@@ -2084,7 +2058,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
     result.terminal.output = ''
     result.session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'continue: goal not reached' }],
-      source: { kind: 'plugin', plugin: 'hooks' },
+      source: { kind: 'plugin', plugin: 'hooks' } as never,
     }), { surfaceOp: 'append' })
     await tick()
     expect(result.terminal.output).toContain('1 queued')
@@ -2145,23 +2119,32 @@ describe('pi-tui chat lifecycle and transcript', () => {
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock)
     const result = await setup({ status: 'running' })
 
+    // rc.2: streamed chunks are live `agent/assistant-stream` frames whose
+    // `time` fields feed the same buckets the appended event times used to.
+    const liveChunks = (step: number, records: { at: number; chunk: Parameters<typeof emitAssistantChunks>[2]['records'][number]['chunk'] }[]): void => {
+      emitAssistantChunks(result.ctx, result.agent, {
+        turn: 1,
+        step,
+        records: records.map(({ at, chunk }) => ({ time: at, chunk })),
+      })
+    }
     clock += 1_000
-    result.session.append('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } })
+    liveChunks(1, [{ at: clock, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } }])
     clock += 2_000
-    result.session.append('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', index: 1, text: 'answering' } })
+    liveChunks(1, [{ at: clock, chunk: { type: 'text-delta', index: 1, text: 'answering' } }])
     clock += 1_000
-    result.session.append('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'reconsidering' } })
+    liveChunks(1, [{ at: clock, chunk: { type: 'reasoning-delta', index: 0, text: 'reconsidering' } }])
     clock += 2_000
-    result.session.append('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', index: 1, text: 'revised' } })
+    liveChunks(1, [{ at: clock, chunk: { type: 'text-delta', index: 1, text: 'revised' } }])
     clock += 3_000
     result.session.append('tool/call', { turn: 1, step: 1, callId: 'c1' as never, name: 'bash', arguments: '{}' })
     clock += 4_000
     result.session.append('step/end', { turn: 1, step: 1 })
     result.session.append('step/start', { turn: 1, step: 2 })
     clock += 1_000
-    result.session.append('assistant/chunk', { turn: 1, step: 2, chunk: { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } } })
+    liveChunks(2, [{ at: clock, chunk: { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } } }])
     clock += 2_000
-    result.session.append('assistant/chunk', { turn: 1, step: 2, chunk: { type: 'text-delta', index: 0, text: 'done' } })
+    liveChunks(2, [{ at: clock, chunk: { type: 'text-delta', index: 0, text: 'done' } }])
     clock += 3_000
     result.terminal.output = ''
     result.session.append('step/end', { turn: 1, step: 2 })
@@ -2182,7 +2165,17 @@ describe('pi-tui chat lifecycle and transcript', () => {
       result = await setup({
         beforeMount(session) {
           clock += 250
-          session.append('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'fast' } })
+          // rc.2: the streamed chunk travels inside the durable attempt event.
+          session.append('assistant/message', {
+            turn: 1,
+            step: 1,
+            message: createMessage({
+              role: 'assistant',
+              content: [{ type: 'text', text: 'fast' }],
+              source: { kind: 'model', provider: 'mock', model: 'deepseek-v4-flash' },
+            }),
+            stream: [{ type: 'chunk', time: clock, chunk: { type: 'text-delta', index: 0, text: 'fast' } }],
+          }, { surfaceOp: 'append' })
           clock += 500
           session.append('step/end', { turn: 1, step: 1 })
           clock += 86_400_000
@@ -2220,7 +2213,16 @@ describe('pi-tui chat lifecycle and transcript', () => {
       result = await setup({
         beforeMount(session) {
           clock += 2_000
-          session.append('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'done' } })
+          session.append('assistant/message', {
+            turn: 1,
+            step: 1,
+            message: createMessage({
+              role: 'assistant',
+              content: [{ type: 'text', text: 'done' }],
+              source: { kind: 'model', provider: 'mock', model: 'deepseek-v4-flash' },
+            }),
+            stream: [{ type: 'chunk', time: clock, chunk: { type: 'text-delta', index: 0, text: 'done' } }],
+          }, { surfaceOp: 'append' })
           clock += 1_000
           session.append('step/end', { turn: 1, step: 1 })
           session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
@@ -2239,7 +2241,11 @@ describe('pi-tui chat lifecycle and transcript', () => {
       result.session.append('step/start', { turn: 2, step: 1 })
       clock += 1_000
       result.terminal.output = ''
-      result.session.append('assistant/chunk', { turn: 2, step: 1, chunk: { type: 'text-delta', index: 0, text: 'next' } })
+      emitAssistantChunks(result.ctx, result.agent, {
+        turn: 2,
+        step: 1,
+        records: [{ time: clock, chunk: { type: 'text-delta', index: 0, text: 'next' } }],
+      })
       await tick()
       expect(result.terminal.output).toContain('Model wait 1.0s')
       expect(result.terminal.output).not.toContain('Model wait 3.0s')
@@ -2268,8 +2274,8 @@ describe('pi-tui chat lifecycle and transcript', () => {
     // (color is off in this harness, so output carries no ANSI to strip).
     // Each phase swaps only the glyph character in the same slot at equal width.
     const phaseGlyph: [() => void, string][] = [
-      [() => result.session.append('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'weighing' } }), 'dsh ✻ '],
-      [() => result.session.append('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', index: 1, text: 'answer' } }), 'dsh ● '],
+      [() => emitAssistantChunks(result.ctx, result.agent, { turn: 1, step: 1, records: [{ time: Date.now(), chunk: { type: 'reasoning-delta', index: 0, text: 'weighing' } }] }), 'dsh ✻ '],
+      [() => emitAssistantChunks(result.ctx, result.agent, { turn: 1, step: 1, records: [{ time: Date.now(), chunk: { type: 'text-delta', index: 1, text: 'answer' } }] }), 'dsh ● '],
       [() => result.session.append('tool/call', { turn: 1, step: 1, callId: 'c1' as never, name: 'bash', arguments: '{}' }), 'dsh ⚙ '],
     ]
     let runningWidth: number | undefined
@@ -2307,7 +2313,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
     const result = await setup({ omitInitialLifecycle: true, now: () => clock })
     const idleWidth = promptWidth(result.terminal.output)
 
-    result.session.append('compaction/start', { turn: null })
+    result.session.append('compaction/start', { compactionId: TEST_COMPACTION_ID, turn: null })
     clock = 1_000
     result.terminal.output = ''
     await new Promise(resolve => setTimeout(resolve, 75))
@@ -2327,7 +2333,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
 
   it('ignores a numbered compaction bracket while the status line is idle', async () => {
     const result = await setup({ now: () => 1_000 })
-    result.session.append('compaction/start', { turn: 1 })
+    result.session.append('compaction/start', { compactionId: TEST_COMPACTION_ID, turn: 1 })
     await tick()
 
     expect(result.terminal.output).toContain('dsh > ')
@@ -2340,9 +2346,9 @@ describe('pi-tui chat lifecycle and transcript', () => {
     let clock = 0
     const result = await setup({ omitInitialLifecycle: true, now: () => clock })
     clock = 1_000
-    result.session.append('compaction/start', { turn: null })
+    result.session.append('compaction/start', { compactionId: TEST_COMPACTION_ID, turn: null })
     await tick()
-    result.session.append('compaction/end', { turn: null })
+    result.session.append('compaction/end', { compactionId: TEST_COMPACTION_ID, turn: null })
     await tick()
 
     clock = 2_000
@@ -2360,9 +2366,9 @@ describe('pi-tui chat lifecycle and transcript', () => {
 
   it('reports a failed standalone compaction when its live bracket closes', async () => {
     const result = await setup({ omitInitialLifecycle: true, now: () => 1_000 })
-    result.session.append('compaction/start', { turn: null })
+    result.session.append('compaction/start', { compactionId: TEST_COMPACTION_ID, turn: null })
     result.terminal.output = ''
-    result.session.append('compaction/end', { turn: null, error: 'summary failed' })
+    result.session.append('compaction/end', { compactionId: TEST_COMPACTION_ID, turn: null, error: 'summary failed' })
     await tick()
 
     expect(result.terminal.output).toContain('Compaction failed: summary failed')
@@ -2373,7 +2379,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
   it('preserves live compaction progress across an idle status edge', async () => {
     let clock = 0
     const result = await setup({ omitInitialLifecycle: true, now: () => clock })
-    result.session.append('compaction/start', { turn: null })
+    result.session.append('compaction/start', { compactionId: TEST_COMPACTION_ID, turn: null })
     clock = 1_000
     result.terminal.output = ''
     agentEvents(result.ctx, result.agent).emit('agent/status', { status: 'idle' })
@@ -2390,12 +2396,12 @@ describe('pi-tui chat lifecycle and transcript', () => {
     const result = await setup({ status: 'running', now: () => clock })
     clock = 1_000
     result.terminal.output = ''
-    result.session.append('compaction/start', { turn: null })
+    result.session.append('compaction/start', { compactionId: TEST_COMPACTION_ID, turn: null })
     await tick()
 
     expect(result.terminal.output).toContain('dsh ◍ ')
     expect(result.terminal.output).not.toContain('dsh ⊙ ')
-    result.session.append('compaction/end', { turn: null })
+    result.session.append('compaction/end', { compactionId: TEST_COMPACTION_ID, turn: null })
     await tick()
     result.terminal.output = ''
     result.terminal.resize(result.terminal.columns + 1)
@@ -2417,16 +2423,16 @@ describe('pi-tui chat lifecycle and transcript', () => {
       result = await setup({ omitInitialLifecycle: true, now: () => clock })
       intervalSpy.mockClear()
       clearIntervalSpy.mockClear()
-      result.session.append('compaction/start', { turn: null })
+      result.session.append('compaction/start', { compactionId: TEST_COMPACTION_ID, turn: null })
       clock = 1_000
-      result.session.append('compaction/start', { turn: null })
+      result.session.append('compaction/start', { compactionId: TEST_COMPACTION_ID, turn: null })
       await tick()
 
       expect(intervalSpy).toHaveBeenCalledOnce()
       expect(result.terminal.output).toContain('dsh ⊙ ')
       expect(result.terminal.progress.at(-1)).toBe(true)
 
-      result.session.append('compaction/end', { turn: null })
+      result.session.append('compaction/end', { compactionId: TEST_COMPACTION_ID, turn: null })
       await tick()
       expect(clearIntervalSpy).toHaveBeenCalledOnce()
       expect(result.terminal.progress.at(-1)).toBe(false)
@@ -2445,7 +2451,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
       omitInitialLifecycle: true,
       now: () => 1_000,
       beforeMount(session) {
-        session.append('compaction/start', { turn: null })
+        session.append('compaction/start', { compactionId: TEST_COMPACTION_ID, turn: null })
       },
     })
 
@@ -2465,7 +2471,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
       result = await setup({ omitInitialLifecycle: true, now: () => 1_000 })
       intervalSpy.mockClear()
       clearIntervalSpy.mockClear()
-      result.session.append('compaction/start', { turn: null })
+      result.session.append('compaction/start', { compactionId: TEST_COMPACTION_ID, turn: null })
       expect(intervalSpy).toHaveBeenCalledOnce()
 
       await dispose(result)
@@ -2500,7 +2506,11 @@ describe('pi-tui chat lifecycle and transcript', () => {
       clock = t
       chunkIndex += 1
       result.terminal.output = ''
-      result.session.append('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', index: chunkIndex, text: '.' } })
+      emitAssistantChunks(result.ctx, result.agent, {
+        turn: 1,
+        step: 1,
+        records: [{ time: clock, chunk: { type: 'text-delta', index: chunkIndex, text: '.' } }],
+      })
       await tick()
       return result.terminal.output
     }
@@ -2530,7 +2540,11 @@ describe('pi-tui chat lifecycle and transcript', () => {
     let clock = 0
     const result = await setup({ status: 'running', config: { theme: { color: true, truecolor: true } }, now: () => clock })
     clock = 1_000
-    result.session.append('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '.' } })
+    emitAssistantChunks(result.ctx, result.agent, {
+      turn: 1,
+      step: 1,
+      records: [{ time: clock, chunk: { type: 'text-delta', index: 0, text: '.' } }],
+    })
     await tick()
 
     // End the turn: the last glyph fades out over 300 ms rather than vanishing.
@@ -2566,7 +2580,11 @@ describe('pi-tui chat lifecycle and transcript', () => {
     const frameAt = async (t: number): Promise<string> => {
       clock = t
       result.terminal.output = ''
-      result.session.append('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '.' } })
+      emitAssistantChunks(result.ctx, result.agent, {
+        turn: 1,
+        step: 1,
+        records: [{ time: clock, chunk: { type: 'text-delta', index: 0, text: '.' } }],
+      })
       await tick()
       return result.terminal.output
     }
@@ -2666,7 +2684,11 @@ describe('pi-tui chat lifecycle and transcript', () => {
     const result = await setup({ status: 'running' })
     clock += 95_000
     result.terminal.output = ''
-    result.session.append('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'hi' } })
+    emitAssistantChunks(result.ctx, result.agent, {
+      turn: 1,
+      step: 1,
+      records: [{ time: clock, chunk: { type: 'text-delta', index: 0, text: 'hi' } }],
+    })
     await tick()
     expect(result.terminal.output).toContain('Model wait 1m35.0s')
     nowSpy.mockRestore()
@@ -2711,7 +2733,11 @@ describe('pi-tui chat lifecycle and transcript', () => {
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock)
     const result = await setup({ status: 'running' })
     clock += 1_000
-    result.session.append('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'answering' } })
+    emitAssistantChunks(result.ctx, result.agent, {
+      turn: 1,
+      step: 1,
+      records: [{ time: clock, chunk: { type: 'text-delta', index: 0, text: 'answering' } }],
+    })
     clock += 4_000
     result.terminal.output = ''
     result.terminal.send('\x1b[?997;2n')
@@ -2732,7 +2758,9 @@ describe('pi-tui chat lifecycle and transcript', () => {
           content: [
             { type: 'text', text: '# Heading\n\n[link](https://example.com) `code`\n\n```ts\nconst x = 1\n```\n\n> quote\n\n---\n\n- item\n\n**bold** *italic* ~~strike~~' },
             { type: 'tool-call', id: 'nested' as never, name: 'nested_tool', arguments: '{}' },
-            { type: 'tool-result', toolCallId: 'nested' as never, content: [{ type: 'reasoning', text: 'nested result' }] },
+            // rc.2 has no tool-result block (results are first-class tool-role
+            // messages); a foreign block type exercises the named placeholder.
+            { type: 'nested-result' } as never,
             { type: 'future-block' } as never,
             {} as never,
           ],
@@ -2759,7 +2787,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
     expect(result.terminal.output).toContain('\x1b[')
     expect(result.terminal.output).toContain('Heading')
     expect(result.terminal.output).toContain('nested_tool({})')
-    expect(result.terminal.output).toContain('nested result')
+    expect(result.terminal.output).toContain('[nested-result]')
     expect(result.terminal.output).toContain('[future-block]')
     expect(result.terminal.output).toContain('[content]')
     expect(result.terminal.output).toContain('\x1b[36mconst answer = 42\x1b[39m')
@@ -2773,10 +2801,12 @@ describe('pi-tui chat lifecycle and transcript', () => {
       beforeMount(session) {
         appendUser(session, 'first prompt')
         appendUser(session, 'second prompt')
-        session.append('assistant/chunk', {
+        // rc.2: a pre-mount stale partial stream is a durable `assistant/attempt`
+        // whose chunks replay without rendering.
+        session.append('assistant/attempt', {
           turn: 1,
           step: 1,
-          chunk: { type: 'text-delta', index: 0, text: 'stale partial response' },
+          stream: [{ type: 'chunk', time: Date.now(), chunk: { type: 'text-delta', index: 0, text: 'stale partial response' } }],
         })
       },
     })
@@ -2897,7 +2927,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
       beforeMount(session) {
         session.append('session/title', {
           title: 'Inspect status \u001B]2;unsafe\u0007',
-          messageSeqs: [1],
+          messageSeqs: [SessionSeq(1)],
           source: { kind: 'fallback' },
         })
         appendAssistant(session, [{ type: 'text', text: 'measured' }], {
@@ -3042,7 +3072,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
 
     // A second /details while the selector is open replaces the overlay
     // instead of stacking a second one behind it.
-    await result.ctx.commands.execute(result.agent, '/details', new AbortController().signal)
+    await result.ctx.commands.execute(result.agent, '/details', [], new AbortController().signal)
     await tick()
 
     // Each Tab applies one step immediately while the dialog stays open:
@@ -3156,20 +3186,22 @@ describe('pi-tui chat lifecycle and transcript', () => {
   it('combines session autocomplete with files and prepares send/steer references asynchronously', async () => {
     const sourceId = SessionId('source-session')
     const sourceHeader: SessionHeader = {
-      version: 0,
+      version: SESSION_FORMAT_VERSION,
       id: sourceId,
       cwd: '/workspace',
       createdAt: 1,
+      isSeeded: false,
     }
     const noCwdHeader: SessionHeader = {
-      version: 0,
+      version: SESSION_FORMAT_VERSION,
       id: SessionId('no-cwd'),
       createdAt: 2,
+      isSeeded: false,
     }
     const sourceEvents: SessionEvent[] = [
       {
         type: 'user/message',
-        seq: 0,
+        seq: SessionSeq(0),
         time: 1,
         data: createUserMessage({
           content: [{ type: 'text', text: 'source background' }],
@@ -3179,11 +3211,11 @@ describe('pi-tui chat lifecycle and transcript', () => {
       },
       {
         type: 'session/title',
-        seq: 1,
+        seq: SessionSeq(1),
         time: 2,
         data: {
           title: 'Source chat',
-          messageSeqs: [0],
+          messageSeqs: [SessionSeq(0)],
           source: { kind: 'fallback' },
         },
       },
@@ -3199,6 +3231,15 @@ describe('pi-tui chat lifecycle and transcript', () => {
       },
       async configureContext(ctx) {
         ctx.provide('tools', { get: () => undefined } as never)
+        // rc.2 discovery never cold-folds a log at keystroke rate: a cold
+        // persisted session's mention label comes solely from its durable
+        // projection checkpoint (written when the session was last open).
+        // Seed the one checkpoint the fixture's source session would carry.
+        ctx.provide('sessionProjectionCache', {
+          cachedSnapshot: (meta: SessionHeader) => meta.id === sourceId
+            ? { asOfSeq: SessionSeq(1), values: { title: 'Source chat' } }
+            : undefined,
+        } as never)
         await ctx.plugin(TestSessionQueryEngine)
         await ctx.plugin(SessionReferenceResolver)
       },
@@ -4232,7 +4273,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
     unrelatedSession.append('todo/write', { todos: [{ content: 'hidden', status: 'pending' }] })
     agentEvents(events.ctx, unrelatedAgent).emit('agent/status', { status: 'running' })
     agentEvents(events.ctx, unrelatedAgent).emit('agent/error', { turn: 1, step: 1, error: new Error('hidden error') })
-    agentEvents(events.ctx, unrelatedAgent).emit('agent/disposed')
+    agentEvents(events.ctx, unrelatedAgent).emit('agent/disposed', { agent: unrelatedAgent })
     agentEvents(events.ctx, events.agent).emit('agent/error', { turn: 1, step: 1, error: new Error('live failure') })
     events.session.append('step/end', { turn: 1, step: 1 })
     events.session.append('turn/end', {
@@ -4263,7 +4304,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
     events.session.append('turn/start', { turn: 9 })
     // Merge-extensible reason kind unknown to the TUI still names the stop.
     events.session.append('turn/end', { turn: 9, reason: { kind: 'plugin-policy' } as never })
-    agentEvents(events.ctx, events.agent).emit('agent/disposed')
+    agentEvents(events.ctx, events.agent).emit('agent/disposed', { agent: events.agent })
     await tick()
     expect(events.terminal.output).toContain('live failure')
     expect(events.terminal.output).toContain('durable failure')
@@ -4283,7 +4324,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
     // The agent leaves the registry (e.g. an agent-loop-only reload) while the
     // TUI stays mounted. A later send must report disposal, not drive the
     // detached zombie agent.
-    agentEvents(result.ctx, result.agent).emit('agent/disposed')
+    agentEvents(result.ctx, result.agent).emit('agent/disposed', { agent: result.agent })
     await tick()
     expect(result.terminal.output).toContain('was disposed')
 
@@ -4937,7 +4978,8 @@ describe('tool cards and surface replay', () => {
         callId: 'c7' as never,
         content: [
           { type: 'tool-call', id: 'inner' as never, name: 'inner', arguments: '{}' },
-          { type: 'tool-result', toolCallId: 'inner' as never, content: [{ type: 'text', text: 'nested output' }] },
+          // rc.2: no tool-result block; a foreign block type renders as its named placeholder.
+          { type: 'nested-result' } as never,
           { type: 'future-result' } as never,
         ],
         isError: false,
@@ -5031,7 +5073,7 @@ describe('tool cards and surface replay', () => {
     expect(output).not.toContain('```console')
     expect(output).toContain('Presenter failed')
     expect(output).toContain('not-json')
-    expect(output).toContain('nested output')
+    expect(output).toContain('[nested-result]')
     expect(output).toContain('[future-result]')
     expect(output).toContain('undefined presenter output')
     expect(output).toContain('Empty card')
@@ -5323,6 +5365,7 @@ describe('tool cards and surface replay', () => {
           ...{ provider: 'mock', model: 'deepseek-v4-flash' },
         },
       }),
+      stream: [],
     }, { surfaceOp: 'append' })
     result.session.append('tool/call', {
       turn: 1, step: 1, callId: 'old-call' as never, name: 'bash', arguments: '{}',
@@ -5337,45 +5380,48 @@ describe('tool cards and surface replay', () => {
     }, { surfaceOp: 'append' })
     // Result pruning rewrites one node's content in place: model-only, and no
     // boundary in the conversation, so the terminal keeps the full output.
-    const originalResult = toolResult.data.message.content[0]
+    const pruned = result.session.append('tool/result', {
+      ...toolResult.data,
+      message: freezeMessage({
+        ...toolResult.data.message,
+        content: [{ type: 'text', text: 'pruned result copy' }],
+      }),
+    }, {
+      surfaceOp: { op: 'replace', startSeq: toolResult.seq, endSeq: toolResult.seq },
+      sourceEventSeqs: [toolResult.seq],
+    })
+    // A second content-only rewrite of the same tool/result node replaces a
+    // node without summarizing anything, so it marks no boundary either.
+    // rc.2: every replace shadows the cited node and the replacement becomes
+    // the current node under its OWN seq, so the chain must cite `pruned.seq`.
+    // (An assistant/message can never replace a surface node — it cannot
+    // cite the shadowed node, and message rewrites ride projections instead.)
     result.session.append('tool/result', {
       ...toolResult.data,
       message: freezeMessage({
         ...toolResult.data.message,
-        content: [{ ...originalResult, content: [{ type: 'text', text: 'pruned result copy' }] }] as [typeof originalResult],
+        content: [{ type: 'text', text: 'generic replacement copy' }],
       }),
     }, {
-      surfaceOp: { op: 'replace', start: toolResult.seq, end: toolResult.seq },
-      sourceEventSeqs: [toolResult.seq],
+      surfaceOp: { op: 'replace', startSeq: pruned.seq, endSeq: pruned.seq },
+      sourceEventSeqs: [pruned.seq],
     })
     const nodes = [...result.session.surface.nodes]
     const checkpoint = result.session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: '<context_checkpoint>model-only summary payload</context_checkpoint>' }],
       source: COMPACT_CHECKPOINT_SOURCE,
     }), {
-      surfaceOp: { op: 'replace', start: nodes[0] as number, end: nodes.at(-1) as number },
-      sourceEventSeqs: nodes,
+      surfaceOp: { op: 'replace', startSeq: nodes[0]!, endSeq: nodes.at(-1)! },
+      sourceEventSeqs: [...nodes],
     })
-    // A regenerated assistant message replaces one node without summarizing
-    // anything, so it marks no boundary either.
-    const generic = result.session.append('assistant/message', {
-      turn: 1,
-      step: 1,
-      message: createMessage({
-        role: 'assistant',
-        content: [{ type: 'text', text: 'generic replacement copy' }],
-        source: {
-          kind: 'model',
-          ...{ provider: 'mock', model: 'deepseek-v4-flash' },
-        },
-      }),
-    }, { surfaceOp: { op: 'replace', start: checkpoint.seq, end: checkpoint.seq }, sourceEventSeqs: [checkpoint.seq] })
     // Only a checkpoint carrying the compaction seam's source marks a boundary:
     // another plugin replacing a node is model-only.
     result.session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'foreign plugin replacement copy' }],
-      source: { kind: 'plugin', plugin: 'other' },
-    }), { surfaceOp: { op: 'replace', start: generic.seq, end: generic.seq }, sourceEventSeqs: [generic.seq] })
+      // An unknown producer kind (rc.2 has no shared catch-all 'plugin' kind):
+      // consumers fall through, so this rewrite cannot mark the compaction seam.
+      source: { kind: 'foreign-producer' } as never,
+    }), { surfaceOp: { op: 'replace', startSeq: checkpoint.seq, endSeq: checkpoint.seq }, sourceEventSeqs: [checkpoint.seq] })
     await tick()
 
     result.terminal.resize(89)
@@ -5426,14 +5472,15 @@ describe('tool cards and surface replay', () => {
               ...{ provider: 'mock', model: 'deepseek-v4-flash' },
             },
           }),
+          stream: [],
         }, { surfaceOp: 'append' })
         const nodes = [...session.surface.nodes]
         session.append('user/message', createUserMessage({
           content: [{ type: 'text', text: '<context_checkpoint>stored model-only payload</context_checkpoint>' }],
           source: COMPACT_CHECKPOINT_SOURCE,
         }), {
-          surfaceOp: { op: 'replace', start: nodes[0] as number, end: nodes.at(-1) as number },
-          sourceEventSeqs: nodes,
+          surfaceOp: { op: 'replace', startSeq: nodes[0]!, endSeq: nodes.at(-1)! },
+          sourceEventSeqs: [...nodes],
         })
       },
     })
@@ -5555,10 +5602,19 @@ describe('tool cards and surface replay', () => {
     result.terminal.send('\x0f')
     result.terminal.send('\x0f')
     await tick()
-    result.session.append('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'live first' } })
+    emitAssistantChunks(result.ctx, result.agent, {
+      turn: 1,
+      step: 1,
+      records: [{ time: Date.now(), chunk: { type: 'text-delta', index: 0, text: 'live first' } }],
+    })
     result.session.append('step/end', { turn: 1, step: 1 })
     result.session.append('step/start', { turn: 1, step: 2 })
-    result.session.append('assistant/chunk', { turn: 1, step: 2, chunk: { type: 'text-delta', index: 0, text: 'live second' } })
+    emitAssistantChunks(result.ctx, result.agent, {
+      turn: 1,
+      step: 2,
+      attemptId: LlmAttemptId('attempt-2'),
+      records: [{ time: Date.now(), chunk: { type: 'text-delta', index: 0, text: 'live second' } }],
+    })
     await tick()
     result.terminal.send('\x0c')
     await tick()
@@ -6470,7 +6526,7 @@ describe('terminal mounting', () => {
     await ctx.plugin(TuiPromptService)
     ctx.provide('tools', { get: () => undefined } as never)
     const session = ctx.sessions.create(SessionId('main'))
-    ctx.agents.register(createBareAgent(ctx, session))
+    await ctx.agents.register(createBareAgent(ctx, session))
     const terminal = new FakeTerminal()
     mountTui(ctx, { theme: { color: false } }, { terminal, exit: vi.fn() })
     await tick()
@@ -6492,7 +6548,7 @@ describe('terminal mounting', () => {
     await ctx.plugin(TuiPromptService)
     ctx.provide('tools', { get: () => undefined } as never)
     const session = ctx.sessions.create(SessionId('main'))
-    ctx.agents.register(createBareAgent(ctx, session))
+    await ctx.agents.register(createBareAgent(ctx, session))
     const terminal = new FakeTerminal()
     // Mirror dsh-tui's own inject (minus loader, the absence under test).
     await ctx.plugin({
@@ -6524,12 +6580,12 @@ describe('terminal mounting', () => {
     expect(terminal.started).toBe(0)
 
     const otherSession = ctx.sessions.create(SessionId('other-session'))
-    ctx.agents.register(createBareAgent(ctx, otherSession))
+    await ctx.agents.register(createBareAgent(ctx, otherSession))
     expect(terminal.started).toBe(0)
 
     const session = ctx.sessions.create(SessionId('late-session'))
     const agent = createBareAgent(ctx, session)
-    ctx.agents.register(agent)
+    await ctx.agents.register(agent)
     await tick()
     expect(terminal.started).toBe(1)
     await ctx.fiber.dispose()
@@ -6559,7 +6615,7 @@ describe('terminal mounting', () => {
     expect(exit).toHaveBeenCalledWith(1)
 
     const session = ctx.sessions.create(SessionId('main-session'))
-    ctx.agents.register(createBareAgent(ctx, session))
+    await ctx.agents.register(createBareAgent(ctx, session))
     await tick()
     expect(terminal.started).toBe(0)
     await ctx.fiber.dispose()
@@ -6601,7 +6657,7 @@ describe('terminal mounting', () => {
     const session = ctx.sessions.create(SessionId('failed-start-session'))
     session.append('turn/start', { turn: 1 })
     session.append('step/start', { turn: 1, step: 1 })
-    ctx.agents.register(createBareAgent(ctx, session, 'running'))
+    await ctx.agents.register(createBareAgent(ctx, session, 'running'))
     const terminal = new FakeTerminal()
     terminal.start = () => { throw new Error('terminal startup failed') }
 
@@ -6614,10 +6670,10 @@ describe('terminal mounting', () => {
     expect(ctx.get('tui')).toBeUndefined()
     await expect(ctx.userQuestions.ask({ questions: [{ id: 'late', question: 'Late?' }] }))
       .rejects.toMatchObject({ code: 'NO_PROVIDER' })
-    session.append('assistant/chunk', {
+    session.append('assistant/attempt', {
       turn: 1,
       step: 1,
-      chunk: { type: 'text-delta', index: 0, text: 'must not render' },
+      stream: [{ type: 'chunk', time: Date.now(), chunk: { type: 'text-delta', index: 0, text: 'must not render' } }],
     })
     await tick()
     expect(terminal.output).not.toContain('must not render')

@@ -41,6 +41,9 @@ import {
   type SessionEvent,
   type UserMessage,
 } from '@deepseek-ai/dsh-session'
+// Type import declaration-merges the `todo/write` session event the todo tool
+// appends (and its `TodoItem` payload) into the event maps this file switches on.
+import type {} from '@deepseek-ai/dsh-tool-todo'
 import { foldGoal } from '@deepseek-ai/dsh-goal'
 import {
   parseSessionReferenceText,
@@ -81,7 +84,6 @@ import {
   fadeGlyph,
   formatQueuedStatus,
   formatStatusDuration,
-  openStepPhase,
   openTurn,
   pulseLevel,
   runningPhaseGlyph,
@@ -412,7 +414,7 @@ export function createTuiChat(
 
   // A configured subtitle renders as a banner line; when absent, the banner has
   // no subtitle. The banner itself sweeps in on start (see startBannerReveal).
-  let sessionTitle = foldSessionTitle(agent.session.events)?.title
+  let sessionTitle = foldSessionTitle(agent.session.snapshotEvents())?.title
   const header = new HeaderComponent(
     agent,
     () => sessionTitle ?? config.welcome,
@@ -461,7 +463,7 @@ export function createTuiChat(
     // and fading out after it ends before the plain `>` returns. Only the gray
     // brightness changes, so the cursor never shifts.
     const statusGlyph = runningPhaseGlyph(
-      agent.session.events,
+      stepTimingTracker.openPhase(agent.session.snapshotEvents()),
       runningStatus !== undefined,
       compacting !== undefined,
     )
@@ -656,13 +658,13 @@ export function createTuiChat(
     editor.borderColor = status === 'running' ? text => palette.accent(text) : text => palette.dim(text)
     editor.hint = status === 'running' ? palette.dim(displayInlineText(resolved.theme.inputPlaceholder)) : undefined
     if (status === 'running') {
-      const turn = priorTurn ?? openTurn(agent.session.events)
+      const turn = priorTurn ?? openTurn(agent.session.snapshotEvents())
       const running: RunningStatus = {
         turn,
         startedAt: now(),
         // Seed with the current phase (ttft before the first step opens) so the
         // fade-out always has a glyph, even for a turn that ends before a render.
-        lastGlyph: TIMING_BUCKET_GLYPHS[openStepPhase(agent.session.events) ?? 'ttft'],
+        lastGlyph: TIMING_BUCKET_GLYPHS[stepTimingTracker.openPhase(agent.session.snapshotEvents()) ?? 'ttft'],
         // Refresh every tick so the fading prompt phase glyph animates even
         // before the first token, when no streaming component exists yet.
         timer: setInterval(renderStatus, STATUS_ANIMATION_INTERVAL_MS),
@@ -771,7 +773,7 @@ export function createTuiChat(
   const startAssistantStep = (position: StepPosition): void => {
     streaming = new StreamingAssistantComponent(
       position,
-      () => agent.session.events,
+      () => agent.session.snapshotEvents(),
       stepTimingTracker,
       now,
       showReasoning,
@@ -787,7 +789,6 @@ export function createTuiChat(
     event: SessionEvent,
     options: {
       addHistory: boolean
-      renderChunks: boolean
     },
   ): void => {
     switch (event.type) {
@@ -833,14 +834,9 @@ export function createTuiChat(
       case 'step/start':
         startAssistantStep(event.data)
         break
-      case 'assistant/chunk':
-        if (options.renderChunks && streaming !== undefined) {
-          streaming.update(event.data.chunk)
-          // The first streamed text/reasoning may make this step the turn's
-          // hidden-mode header owner (or a continuation with a visible body).
-          applyTurnFolding(streaming.position.turn)
-        }
-        break
+      // Live streamed chunks no longer travel as session events: they arrive
+      // through the `agent/assistant-stream` listener below, and the settled
+      // `assistant/message` embeds the exact stream for replay.
       case 'assistant/message':
         completedStreaming = undefined
         // A settled component stays attached but never absorbs a later message
@@ -867,7 +863,7 @@ export function createTuiChat(
         trailStreamingTiming()
         break
       case 'tool/result': {
-        const callId = event.data.message.source.callId
+        const callId = event.data.message.toolCallId
         let card = toolCards.get(callId)
         if (card === undefined) {
           card = new ToolCardComponent(
@@ -972,19 +968,20 @@ export function createTuiChat(
     streaming = undefined
     todo.update([])
     const transcriptCalls = transcriptToolCallIds(agent.session)
-    for (const event of agent.session.events) {
+    for (const event of agent.session.snapshotEvents()) {
       if (isReplacementSurfaceEvent(event)) {
         if (isCompactCheckpoint(event)) renderCompactionMarker()
         continue
       }
       if (event.type === 'tool/call' && !transcriptCalls.has(event.data.callId)) continue
-      renderEvent(event, { addHistory: populateHistory, renderChunks: false })
+      renderEvent(event, { addHistory: populateHistory })
     }
     requestRender()
   }
 
   const questions = createQuestionQueue({
     ctx,
+    agent,
     resolved,
     palette,
     overlayManager,
@@ -1212,7 +1209,7 @@ export function createTuiChat(
     /* v8 ignore next -- SystemPrompt always emits at least its required base section. */
     const systemPrompt = displayText(renderPrompt(assembly)) || '(empty)'
     const registeredTools = assembly.tools.map(tool => displayText(tool.name)).join(', ') || '(none)'
-    const events = agent.session.events
+    const events = agent.session.snapshotEvents()
     const latestActivity = events.findLast(event => event.type !== 'session/end-seed')?.time
       ?? agent.session.header.createdAt
     const usedContext = Math.max(0, Math.round(ctx.tokenMeter.measure(agent.session).totalTokens))
@@ -1420,7 +1417,7 @@ export function createTuiChat(
   const runCommand = (text: string): void => {
     const controller = new AbortController()
     commandControllers.add(controller)
-    void ctx.commands.execute(agent, text, controller.signal).then(
+    void ctx.commands.execute(agent, text, [], controller.signal).then(
       (execution) => {
         if (disposed) return
         if (execution === undefined) {
@@ -1682,7 +1679,7 @@ export function createTuiChat(
       return
     }
     if (event.type === 'compaction/end' && event.data.turn === null && compacting !== undefined) {
-      const fadeOutGlyph = runningPhaseGlyph(agent.session.events, false, true)
+      const fadeOutGlyph = runningPhaseGlyph(undefined, false, true)
       clearInterval(compacting.timer)
       compacting = undefined
       if (event.data.error !== undefined) {
@@ -1701,7 +1698,54 @@ export function createTuiChat(
       requestRender()
       return
     }
-    renderEvent(event, { addHistory: false, renderChunks: true })
+    renderEvent(event, { addHistory: false })
+    requestRender()
+  })
+  // Live model streams are process-local publications (`agent/assistant-stream`
+  // frames), not session events. `start`/`chunk` frames drive the streaming
+  // component; the settled `assistant/message` session event embeds the exact
+  // stream and owns the final content, so a committed `end` renders nothing.
+  // Chunk frames omit turn/step coordinates, so the position carried by each
+  // attempt's `start` frame is remembered keyed by `attemptId`.
+  const streamPositions = new Map<string, StepPosition>()
+  const disposeStream = ctx.on('agent/assistant-stream', ({ agent: subject, frame }) => {
+    if (subject !== agent || disposed) return
+    if (frame.type === 'start') {
+      const position = { turn: frame.turn, step: frame.step }
+      streamPositions.set(frame.attemptId, position)
+      if (streaming === undefined
+        || streaming.position.turn !== position.turn
+        || streaming.position.step !== position.step) {
+        startAssistantStep(position)
+      } else {
+        // A retried attempt republishes the step's stream from scratch.
+        streaming.restart()
+      }
+      if (streaming !== undefined) applyTurnFolding(streaming.position.turn)
+    } else if (frame.type === 'chunk') {
+      const position = streamPositions.get(frame.attemptId)
+      if (position !== undefined) {
+        stepTimingTracker.feedLiveChunk(position, frame.time, frame.chunk)
+      }
+      if (streaming !== undefined && position !== undefined
+        && streaming.position.turn === position.turn
+        && streaming.position.step === position.step) {
+        streaming.update(frame.chunk)
+        // The first streamed text/reasoning may make this step the turn's
+        // hidden-mode header owner (or a continuation with a visible body).
+        applyTurnFolding(streaming.position.turn)
+      }
+    } else if (frame.type === 'end') {
+      streamPositions.delete(frame.attemptId)
+      // An abandoned attempt (retry/cancel/stream error) leaves no durable
+      // event; drop its partial blocks so the card does not keep content the
+      // model never committed. A committed attempt is settled below by the
+      // `assistant/message` session event.
+      if (frame.outcome.kind === 'abandoned' && streaming !== undefined
+        && !streaming.isSettled()) {
+        streaming.restart()
+      }
+    }
     requestRender()
   })
   const settlePendingSteering = (id: MessageId): void => {
@@ -1752,6 +1796,7 @@ export function createTuiChat(
     for (const value of promptValues) value.dispose()
     stopBannerReveal()
     disposeSessionEvents()
+    disposeStream()
     disposeClaimed()
     disposeDiscarded()
     disposeStatus()
@@ -1791,7 +1836,7 @@ export function createTuiChat(
   }
 
   rebuildTranscript(true)
-  const restoredGoal = foldGoal(agent.session.events).goal
+  const restoredGoal = foldGoal(agent.session.snapshotEvents()).goal
   /* v8 ignore next -- goal replay coverage lives with the goal seam; the TUI only formats its startup notice. */
   if (restoredGoal !== undefined && restoredGoal.phase !== 'complete') {
     appendNotice(

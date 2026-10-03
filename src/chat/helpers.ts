@@ -91,7 +91,7 @@ export function gitBranch(cwd: string): string | undefined {
  */
 export function transcriptToolCallIds(session: Session): Set<string> {
   const ids = new Set<string>()
-  for (const event of session.events) {
+  for (const event of session.snapshotEvents()) {
     if (event.type !== 'assistant/message' || !isAppendSurfaceEvent(event)) continue
     for (const block of event.data.message.content) {
       if (block.type === 'tool-call') ids.add(block.id)

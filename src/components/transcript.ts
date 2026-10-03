@@ -18,7 +18,9 @@ import {
 import { diffLines as compareLines } from 'diff'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, StreamChunk } from '@deepseek-ai/dsh-llm'
-import type { JsonValue, SessionEvent, TodoItem } from '@deepseek-ai/dsh-session'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
 import type {
   TerminalCallView,
   ToolCallView,
@@ -299,6 +301,17 @@ export class StreamingAssistantComponent extends Container {
   }
 
   /**
+   * Discard the live streamed blocks for a restarted attempt. Since 0.2.0
+   * chunks are not session events; each model attempt republishes its stream
+   * through `agent/assistant-stream` and a retry begins with fresh indexes.
+   */
+  restart(): void {
+    this.blocks.clear()
+    this.settledContent = undefined
+    this.rebuild()
+  }
+
+  /**
    * Whether this step's assistant message has settled.
    * @returns `true` once {@link settle} has run.
    */
@@ -486,10 +499,11 @@ export class ToolCardComponent extends CachedCardComponent {
   updateResult(event: Extract<SessionEvent, { type: 'tool/result' }>['data']): void {
     this.diffBodyCache = undefined
     this.dropLines()
-    const result = event.message.content[0]
+    // Since 0.2.0 the result is a first-class tool-role message: its blocks and
+    // error flag live on the message, not on a nested content block.
     this.result = {
-      content: [...result.content],
-      isError: result.isError === true,
+      content: [...event.message.content],
+      isError: event.message.isError === true,
       ...event.meta !== undefined ? { meta: event.meta } : {},
     }
     if (this.parsed.valid && this.definition?.presentResult) {

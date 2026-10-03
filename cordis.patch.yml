@@ -1,7 +1,15 @@
 # Turtle UI's dsh profile bundle patch (declared by the `dsh.bundle.patch`
 # manifest field): applied over the dsh-base layer when this package appears
-# in a profile's `dsh.profile.bundles` list. Overrides base rows by id and inserts the
-# TUI front door plus its projection/storage support rows.
+# in a profile's `dsh.profile.bundles` list. Overrides base rows by id and
+# inserts the TUI front door plus its context rows.
+#
+# Since 0.2.0 the terminal surface keeps the base's host-plane composition:
+# the agent's tools, prompt sections, and delegation backends stay mounted
+# process-wide (the base explicitly keeps them "for the TUI"), so this patch
+# mounts neither the agent-preset registry nor preset declarations — those are
+# the Web surface's per-session plane. The durable storage stack
+# (storage/storage-json/storage-domain) and session-projection-cache likewise
+# ship in dsh-base now, so they no longer need inserting here.
 
 # The ordinary tui-startup provider injects cmdlineArgs, owns --resume,
 # --session, and this app's --help, then provides tuiStartup. Session-bound
@@ -20,7 +28,8 @@
 
 - id: system-prompt
   config:
-    persona: |
+    # `persona` was split into personaPrefix/personaSuffix in 0.2.0.
+    personaPrefix: |
       You are a coding agent powered by the {{model}} model.
 
       Verify your work by running the code or tests. Keep answers brief and
@@ -44,25 +53,6 @@
 - insert:
     - id: session-reference
       name: '@deepseek-ai/dsh-session-reference'
-
-    - id: storage
-      name: '@deepseek-ai/dsh-storage'
-
-    - id: storage-json
-      name: '@deepseek-ai/dsh-storage-json'
-      config:
-        root: !!js dshHomePath('storages')
-
-    - id: storage-domain
-      name: '@deepseek-ai/dsh-storage-domain'
-      config:
-        backend: json
-
-    - id: session-projection-cache
-      name: '@deepseek-ai/dsh-session-projection-cache'
-      config:
-        writeEveryEvents: 200
-        writeIntervalMs: 5000
 
     - id: tmux-context
       name: '@deepseek-ai/dsh-tmux-context'

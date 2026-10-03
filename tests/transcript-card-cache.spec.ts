@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { createToolResultMessage, CallId } from '@deepseek-ai/dsh-llm'
+import { createToolResultMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { ContextCardComponent, ToolCardComponent } from '../src/components/transcript.ts'
 import { parseArguments } from '../src/components/content.ts'
 import { createPalette, markdownTheme } from '../src/components/theme.ts'
@@ -14,7 +14,7 @@ function toolCard(): ToolCardComponent {
 
 function toolResult(text: string): Extract<SessionEvent, { type: 'tool/result' }>['data'] {
   const message = createToolResultMessage({
-    callId: CallId('call-1'),
+    callId: ToolCallId('call-1'),
     content: [{ type: 'text', text }],
     isError: false,
   })
