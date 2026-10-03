@@ -11,18 +11,18 @@ buffer
 2| " target-session"
   style 1-14 dim
 3| <blank>
-4| "You                                                                                             "
-  style 0-2 fg=bright-magenta bold underline
-5| "Use @Source session                                                                             "
-6| <blank>
-7| "Referenced sessions · Source session (source-session)                                           "
-  style 0-52 dim
-8| <blank>
-9| "Assistant                                                                                       "
+4| "Assistant                                                                                       "
   style 0-8 fg=bright-magenta bold underline
-10| "Combined reference request accepted.                                                            "
-11| "Model wait 0.0s · Completed 2026-07-21 12:30:00                                                 "
+5| "Combined reference request accepted.                                                            "
+6| "Model wait 0.0s · Completed 2026-07-21 12:30:00                                                 "
   style 0-46 dim
+7| <blank>
+8| "Referenced sessions · Source session (source-session)                                           "
+  style 0-52 dim
+9| <blank>
+10| "You                                                                                             "
+  style 0-2 fg=bright-magenta bold underline
+11| "Use @Source session                                                                             "
 12| <blank>
 13| "/workspace/project  mock  ↑0 ↓0"
   style 0-17 fg=bright-magenta bold

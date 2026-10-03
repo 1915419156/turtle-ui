@@ -29,12 +29,12 @@ buffer
 12| "    unavailable: current session                                                            "
   style 2-31 fg=yellow
 13| "    Other workspace work                                                                    "
-14| "    2024-02-02T00:00:00.000Z · persisted · elsewhere-session                                "
+14| "    2024-02-02T00:00:08.000Z · persisted · elsewhere-session                                "
   style 2-59 dim
 15| "    workspace /workspace/other                                                              "
   style 2-29 dim
 16| "    Resume selector design                                                                  "
-17| "    2024-01-01T00:00:00.000Z · persisted · earlier-session                                  "
+17| "    2024-01-01T00:00:08.000Z · persisted · earlier-session                                  "
   style 2-57 dim
 18| "    workspace /workspace/project                                                            "
   style 2-31 dim

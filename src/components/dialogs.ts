@@ -8,6 +8,7 @@
 import {
   Input,
   Key,
+  Markdown,
   SelectList,
   matchesKey,
   truncateToWidth,
@@ -15,6 +16,7 @@ import {
   wrapTextWithAnsi,
   type Component,
   type Focusable,
+  type MarkdownTheme,
   type SelectItem,
 } from '@earendil-works/pi-tui'
 import type { Context } from '@deepseek-ai/cordis'
@@ -812,6 +814,7 @@ export class QuestionDialog implements Component, Focusable {
   private error = ''
   private readonly input = new Input()
   private readonly options: NonNullable<AskUserQuestionItem['options']>
+  private readonly mdTheme: MarkdownTheme | undefined
   focused = false
 
   constructor(
@@ -824,8 +827,10 @@ export class QuestionDialog implements Component, Focusable {
     private readonly palette: Palette,
     private readonly done: (selection: QuestionSelection) => void,
     private readonly cancel: () => void,
+    mdTheme?: MarkdownTheme,
   ) {
     this.options = question.options ?? []
+    this.mdTheme = mdTheme
     this.mode = this.options.length > 0 ? 'options' : 'custom'
     this.input.onSubmit = (value) => { this.submitCustom(value) }
     this.input.onEscape = () => {
@@ -836,6 +841,18 @@ export class QuestionDialog implements Component, Focusable {
         this.cancel()
       }
     }
+  }
+
+  /** Whether this question presents a plan for approval (plan-mode review flow). */
+  private get planReview(): boolean {
+    return this.question.intent?.kind === 'plan-review'
+  }
+
+  /** The intent-declared approve option label, when this is a plan review. */
+  private get approveLabel(): string | undefined {
+    return this.planReview && this.question.intent?.kind === 'plan-review'
+      ? this.question.intent.approve
+      : undefined
   }
 
   invalidate(): void {
@@ -952,16 +969,29 @@ export class QuestionDialog implements Component, Focusable {
       innerWidth,
     )
     const contentLines = [...questionLines]
-    const headerLines: string[] = [
-      ...wrapTextWithAnsi(this.palette.dim(header), innerWidth),
-      ...questionLines,
-    ]
+    const headerLines: string[] = []
+    // A plan review leads with its own title so the approval decision reads as
+    // such at a glance, before the standard position meta.
+    if (this.planReview) {
+      const title = this.palette.bold(this.palette.accent('Plan review'))
+      headerLines.push(truncateToWidth(title, innerWidth, '…'))
+      contentLines.push(title)
+    }
+    headerLines.push(...wrapTextWithAnsi(this.palette.dim(header), innerWidth))
+    headerLines.push(...questionLines)
     // Supporting detail (e.g. the full plan under review) renders between the
-    // question and the answer surface, kept out of option labels.
+    // question and the answer surface, kept out of option labels. A plan
+    // review's detail is authored markdown, so it renders through the Markdown
+    // component (headings, lists, code) instead of flat wrapping.
     if (this.question.detail !== undefined) {
       headerLines.push('')
       contentLines.push('')
-      for (const line of wrapTextWithAnsi(displayText(this.question.detail), innerWidth)) {
+      const detailLines = this.planReview && this.mdTheme !== undefined
+        ? new Markdown(displayText(this.question.detail), 0, 0, this.mdTheme, {
+          color: value => this.palette.text(value),
+        }).render(innerWidth)
+        : wrapTextWithAnsi(displayText(this.question.detail), innerWidth)
+      for (const line of detailLines) {
         headerLines.push(line)
         contentLines.push(line)
       }
@@ -1098,10 +1128,15 @@ export class QuestionDialog implements Component, Focusable {
     const labelLines = wrapTextWithAnsi(displayText(option.label), labelBodyWidth)
     const continuation = ' '.repeat(labelPrefixWidth)
     const lines: string[] = []
+    // The plan review's approve option carries the decision, so its label
+    // reads in the success role even while another row is highlighted.
+    const approve = option.label === this.approveLabel
     for (const [lineIndex, labelLine] of labelLines.entries()) {
       const prefix = lineIndex === 0 ? labelPrefixPlain : continuation
       const composed = `${prefix}${labelLine}`
-      lines.push(index === this.selectedIndex ? this.palette.bold(this.palette.accent(composed)) : composed)
+      if (index === this.selectedIndex) lines.push(this.palette.bold(this.palette.accent(composed)))
+      else if (approve) lines.push(this.palette.success(composed))
+      else lines.push(composed)
     }
     if (option.description !== undefined) {
       const descIndent = ' '.repeat(labelPrefixWidth)

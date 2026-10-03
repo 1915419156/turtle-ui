@@ -12,6 +12,8 @@ import { RetryId } from '@deepseek-ai/dsh-llm-retry'
 import { SESSION_FORMAT_VERSION, SessionId, SessionSeq, type Session, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import SessionReferenceResolver from '@deepseek-ai/dsh-session-reference'
+import { SessionTitleService } from '@deepseek-ai/dsh-session-title'
+import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry, { type ToolDefinition, type ToolResultView } from '@deepseek-ai/dsh-tools'
 import * as ToolCordis from '@deepseek-ai/dsh-tool-cordis'
@@ -52,6 +54,7 @@ const CHECKPOINTS = [
   'details-command',
   'details-selector',
   'untrusted-controls',
+  'plan-review-dialog',
   'question-dialog',
   'question-dialog-detail-paged',
   'question-dialog-paged',
@@ -148,8 +151,12 @@ async function configureAdvancedTools(ctx: Context): Promise<void> {
   // `code` was the 0.0.1 spelling; 0.2.0 presents the same run_code surface as
   // `ptc`, which requires a PTC runtime whose language picks the SDK schema.
   ctx.provide('ptcRuntime', { language: 'typescript' } as never)
-  ctx.provide('workflows', { start() {} } as never)
-  await ctx.plugin(ToolRegistry, { mode: 'ptc' })
+  // rc.2 renamed the workflow service (`workflows` -> `workflowEngine`); cordis
+  // inspection reads the `cordisInspect` host provider.
+  ctx.provide('workflowEngine', { start() {}, stop() {}, list() { return [] } } as never)
+  ctx.provide('cordisInspect', { list: () => [], query: () => Promise.resolve({}) } as never)
+  // 'both' keeps the native tools registered (their cards) alongside run_code.
+  await ctx.plugin(ToolRegistry, { mode: 'both' })
   await ctx.plugin(ToolWorkflow, { toolName: 'workflow', maxResultChars: 50_000 })
   await ctx.plugin(ToolCordis)
 }
@@ -382,7 +389,7 @@ describe('TUI terminal-state snapshots', () => {
           { time: clock + 2_000, chunk: { type: 'text-delta', index: 1, text: 'The result is ready.' } },
         ],
       })
-      clock += 3_000
+      clock += 5_000
       harness.session.append('step/end', { turn: 1, step: 1 })
     })
     await checkpoint('step-timing-completed', harness.terminal, { includeScrollback: true })
@@ -535,6 +542,11 @@ describe('TUI terminal-state snapshots', () => {
       async configureContext(ctx) {
         ctx.provide('tools', { get: () => undefined } as never)
         await ctx.plugin(TestSessionQueryEngine)
+        // rc.2: candidate labels read the `title` projection, so the projection
+        // registry plus the real title service must be mounted for a log-backed
+        // title to surface.
+        await ctx.plugin(SessionProjectionRegistry)
+        await ctx.plugin(SessionTitleService, { fallbackMaxWords: 6, fallbackMaxBytes: 120, maxTitleBytes: 240 })
         await ctx.plugin(SessionReferenceResolver)
         const source = ctx.sessions.create(SessionId('opaque-source-id'), {
           meta: { cwd: '/workspace/project', createdAt: 1 },
@@ -592,16 +604,17 @@ describe('TUI terminal-state snapshots', () => {
     await disposeSnapshot(harness)
   })
 
-  it('pins cordis inspect, try, and stop cards with production presenters', async () => {
+  it('pins the cordis inspect tools with their production presenters', async () => {
     const harness = await setupSnapshot({ configureContext: configureAdvancedTools })
+    // rc.2 collapsed the cordis tool surface to the two read-only inspect
+    // tools (mount/unmount moved out of this plugin).
     const calls = [
-      { id: 'cordis-1', name: 'cordis_inspect', arguments: { what: 'tools' } },
+      { id: 'cordis-1', name: 'cordis_inspect_list', arguments: {} },
       {
         id: 'cordis-2',
-        name: 'cordis_mount',
-        arguments: { code: "return { name: 'snapshot-marker', apply(ctx) { ctx.provide('snapshotMarker', { ready: true }) } }" },
+        name: 'cordis_inspect_query',
+        arguments: { platform: 'host', provider: 'tools', method: 'list', input: {} },
       },
-      { id: 'cordis-3', name: 'cordis_unmount', arguments: { id: 'dyn-1' } },
     ]
     await renderAfter(harness, () => { appendToolCalls(harness.session, calls) })
     await checkpoint('cordis-tools-pending', harness.terminal, { includeScrollback: true })
@@ -779,6 +792,32 @@ describe('TUI terminal-state snapshots', () => {
     await rejected
     await disposeSnapshot(harness)
     nowSpy.mockRestore()
+  })
+
+  it('pins the plan-review dialog with its markdown plan and accent approve option', async () => {
+    const harness = await setupSnapshot({}, { columns: 92, rows: 30 })
+    const controller = new AbortController()
+    const beforeQuestion = harness.terminal.frames
+    const answer = harness.ctx.userQuestions.ask({
+      questions: [{
+        id: 'plan-review',
+        header: 'Plan',
+        question: 'Review the implementation plan.',
+        detail: '# Renderer plan\n\nTrack every surface mutation through one\nfold, and feed live frames through the\nshared timing tracker.\n\n```ts\ntracker.feedLiveChunk(position, time, chunk)\n```\n\n- keeps replay and live identical\n- avoids re-expanding settled steps',
+        options: [
+          { label: 'Approve', description: 'Leave plan mode and carry out the plan' },
+          { label: 'Keep planning', description: 'Stay in plan mode; give feedback' },
+        ],
+        intent: { kind: 'plan-review', approve: 'Approve' },
+      }],
+      signal: controller.signal,
+    })
+    const rejected = expect(answer).rejects.toMatchObject({ code: 'ASK_ABORTED' })
+    await harness.terminal.waitForFrame(beforeQuestion)
+    await checkpoint('plan-review-dialog', harness.terminal)
+    controller.abort()
+    await rejected
+    await disposeSnapshot(harness)
   })
 
   it('pins a constrained multi-select question and its validation state', async () => {

@@ -27,7 +27,7 @@ buffer
 11| "    unavailable: current session                                                            "
   style 2-31 fg=yellow
 12| "    Resume selector design                                                                  "
-13| "    2024-01-01T00:00:00.000Z · persisted · earlier-session                                  "
+13| "    2024-01-01T00:00:08.000Z · persisted · earlier-session                                  "
   style 2-57 dim
 14| "                                                                                            "
 15| "                                                                                            "

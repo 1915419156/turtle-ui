@@ -3056,6 +3056,35 @@ describe('pi-tui chat lifecycle and transcript', () => {
     await dispose(result)
   })
 
+  it('/theme reports and pins the transcript palette scheme', async () => {
+    const result = await setup({ config: { theme: { color: true } } })
+    const run = async (line: string): Promise<void> => {
+      result.terminal.send(line)
+      result.terminal.send('\r')
+      await tick()
+    }
+
+    await run('/theme')
+    expect(result.terminal.output).toContain('Current theme: dark')
+
+    await run('/theme light')
+    expect(result.terminal.output).toContain('Theme switched to light.')
+
+    await run('/theme')
+    expect(result.terminal.output).toContain('Current theme: light')
+
+    await run('/theme light')
+    expect(result.terminal.output).toContain('The theme is already light.')
+
+    await run('/theme bogus')
+    expect(result.terminal.output).toContain('Unknown /theme argument')
+
+    // A color-scheme switch rebuilds the transcript against the new palette;
+    // the conversation stays rendered after the switch.
+    expect(result.terminal.output).toContain('Coding agent ready.')
+    await dispose(result)
+  })
+
   it('bare /details opens the transcript-details toggle and Tab applies immediately', async () => {
     const result = await setup()
     const open = async (): Promise<number> => {
@@ -5679,6 +5708,37 @@ describe('TUI user-questions dialogs', () => {
     expect(editorIndex).toBeGreaterThan(questionIndex)
     result.terminal.send('\x03')
     await rejected
+    await dispose(result)
+  })
+
+  it('renders a plan review with its markdown plan and approves it', async () => {
+    const result = await setup()
+
+    const review = result.ctx.userQuestions.ask({
+      questions: [{
+        id: 'plan-review',
+        header: 'Plan',
+        question: 'Review the implementation plan.',
+        detail: '# Renderer plan\n\n- **Own** the surface fold\n- use `feedLiveChunk` for live frames',
+        options: [
+          { label: 'Approve', description: 'Leave plan mode and carry out the plan' },
+          { label: 'Keep planning', description: 'Stay in plan mode; give feedback' },
+        ],
+        intent: { kind: 'plan-review', approve: 'Approve' },
+      }],
+    })
+    await tick()
+    // The dedicated title replaces the generic question header's leading role.
+    expect(result.terminal.output).toContain('Plan review')
+    expect(result.terminal.output).toContain('Review the implementation plan.')
+    // The plan renders as authored markdown: list markers survive, inline code
+    // is styled, and the content is not re-wrapped flat.
+    expect(result.terminal.output).toContain('Renderer plan')
+    expect(result.terminal.output).toContain('Own the surface fold')
+    expect(result.terminal.output).toContain('feedLiveChunk')
+    expect(result.terminal.output).toContain('Approve')
+    result.terminal.send('\r')
+    await expect(review).resolves.toEqual({ answers: [{ id: 'plan-review', selected: ['Approve'] }] })
     await dispose(result)
   })
 

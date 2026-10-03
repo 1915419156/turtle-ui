@@ -7,6 +7,7 @@
  */
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { MarkdownTheme } from '@earendil-works/pi-tui'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import {
   UserQuestionError,
@@ -33,6 +34,8 @@ interface PendingQuestion {
 export interface QuestionQueueDeps extends ChatChannelDeps {
   /** The agent this terminal answers questions for; the waterfall is agent-scoped. */
   readonly agent: Agent
+  /** Markdown theme for authored question bodies (e.g. plan-review plans). */
+  readonly mdTheme: MarkdownTheme
   /** Current row budget after reserving the editor. */
   questionMaxHeight(): number
 }
@@ -51,7 +54,7 @@ export interface QuestionQueue {
  * @returns the controller used at shutdown to drain and unregister.
  */
 export function createQuestionQueue(deps: QuestionQueueDeps): QuestionQueue {
-  const { resolved, palette, overlayManager } = deps
+  const { resolved, palette, mdTheme, overlayManager } = deps
   const questionQueue: PendingQuestion[] = []
   let activeQuestion: PendingQuestion | undefined
 
@@ -105,6 +108,7 @@ export function createQuestionQueue(deps: QuestionQueueDeps): QuestionQueue {
             rejectQuestion(pending)
             startNextQuestion()
           },
+          mdTheme,
         ),
         options: {
           width: resolved.questionDialogWidth,

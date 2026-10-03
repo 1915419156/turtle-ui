@@ -18,8 +18,8 @@ buffer
 6| "Unsafe reasoning \\x1b]2;snapshot-controlled\\x07\\x09\\x7f\\x9b31m                                      "
   style 0-61 dim italic
 7| "Unsafe assistant \\x1b]2;snapshot-controlled\\x07\\x09\\x7f\\x9b31m                                      "
-8| "Model wait 0.0s                                                                                     "
-  style 0-14 dim
+8| "Model wait 0.0s · Thinking 0.0s                                                                     "
+  style 0-30 dim
 9| <blank>
 10| "You                                                                                                 "
   style 0-2 fg=bright-magenta bold underline
@@ -38,8 +38,8 @@ buffer
   style 0-58 dim
 19| "[signal SIG\\x1b]2;snapshot-controlled\\x07\\x09\\x7f\\x9b31m]                                           "
   style 0-56 fg=red
-20| "Model wait 0.0s · Completed 2026-07-21 15:00:00                                                     "
-  style 0-46 dim
+20| "Model wait 0.0s · Thinking 0.0s · Completed 2026-07-21 15:00:00                                     "
+  style 0-62 dim
 21| <blank>
 22| "Context · unsafe-\\x1b]2;snapshot-controlled\\x07\\x09\\x7f\\x9b31m"
   style 0-61 dim

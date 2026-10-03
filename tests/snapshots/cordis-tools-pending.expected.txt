@@ -1,7 +1,7 @@
 terminal 96x36 buffer=normal length=36 base=0 viewport=0
 lifecycle started=1 stopped=0 progress=inactive
 title "DSH snapshot"
-cursor hidden column=7 viewportRow=21 bufferRow=21
+cursor hidden column=7 viewportRow=14 bufferRow=14
 buffer
 0| " DEEPSEEK HARNESS"
   style 1-8 fg=bright-magenta bold
@@ -14,32 +14,24 @@ buffer
 4| "Assistant                                                                                       "
   style 0-8 fg=bright-magenta bold underline
 5| <blank>
-6| "○ Tool / cordis_inspect"
-  style 0-22 fg=yellow
-7| "Inspect cordis runtime: tools                                                                   "
+6| "○ Tool / cordis_inspect_list"
+  style 0-27 fg=yellow
+7| "List Cordis Inspect Providers                                                                   "
 8| <blank>
-9| "○ Tool / cordis_mount"
-  style 0-20 fg=yellow
-10| "Mount temporary Cordis Plugin                                                                   "
-11| "{                                                                                               "
-12| "  \"code\": \"return { name: 'snapshot-marker', apply(ctx) { ctx.provide('snapshotMarker', { ready:"
-13| "true }) } }\"                                                                                    "
-14| "}                                                                                               "
-15| <blank>
-16| "○ Tool / cordis_unmount"
-  style 0-22 fg=yellow
-17| "Unmount temporary Cordis Plugin dyn-1                                                           "
-18| "Model wait 0.0s                                                                                 "
+9| "○ Tool / cordis_inspect_query"
+  style 0-28 fg=yellow
+10| "Query Cordis host tools.list                                                                    "
+11| "Model wait 0.0s                                                                                 "
   style 0-14 dim
-19| <blank>
-20| "/workspace/project (tui-staging)  deepseek-v4-flash  ↑0 ↓0  0% context"
+12| <blank>
+13| "/workspace/project (tui-staging)  deepseek-v4-flash  ↑0 ↓0  0% context"
   style 0-17 fg=bright-magenta bold
   style 18-31 dim
   style 34-50 dim
   style 53-57 dim
   style 60-69 dim
-21| " dsh >                                                                                          "
+14| " dsh >                                                                                          "
   style 1-3 fg=bright-magenta bold
   style 5-6 dim
   style 7-7 inverse
-22-35| <blank>
+15-35| <blank>

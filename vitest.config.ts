@@ -22,7 +22,7 @@ export default defineConfig({
     },
   },
   test: {
-    include: ['tests/**/*.spec.ts'],
+    include: ['tests/**/*.spec.ts', 'tests/**/*.snapshot.ts'],
     pool: 'forks',
   },
 })

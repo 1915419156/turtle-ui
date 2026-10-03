@@ -101,7 +101,7 @@ buffer
 31| <blank>
 32| "System prompt                                           "
   style 0-12 fg=bright-magenta bold
-33| "You are an AI agent powered by the DeepSeek Harness SDK."
+33| "You are an AI agent powered by DeepSeek Harness.        "
 34| "                                                        "
 35| "Paths prefixed with @ are files explicitly referenced by"
 36| "the user. Use the read tool when their contents are     "

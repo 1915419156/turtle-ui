@@ -14,14 +14,14 @@ buffer
 4| "Assistant                                                                                           "
   style 0-8 fg=bright-magenta bold underline
 5| "Running the check now.                                                                              "
-6| "Model wait 0.0s                                                                                     "
-  style 0-14 dim
+6| "Model wait 0.0s · Thinking 0.0s                                                                     "
+  style 0-30 dim
 7| <blank>
 8| "You                                                                                                 "
   style 0-2 fg=bright-magenta bold underline
 9| "Inspect the renderer.                                                                               "
-10| "Model wait 0.0s · Completed 2026-07-30 18:00:00                                                     "
-  style 0-46 dim
+10| "Model wait 0.0s · Thinking 0.0s · Completed 2026-07-30 18:00:00                                     "
+  style 0-62 dim
 11| <blank>
 12| "Reasoning blocks hidden.                                                                            "
   style 0-23 dim

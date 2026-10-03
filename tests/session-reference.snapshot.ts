@@ -10,6 +10,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import CommandService from '@deepseek-ai/dsh-commands'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import SessionReferenceResolver, { formatSessionReferenceMention } from '@deepseek-ai/dsh-session-reference'
@@ -25,13 +26,15 @@ class SnapshotAdapter extends LlmAdapter {
 
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
-    // The snapshot rides the prompt's admission: the loop appends the
-    // prompt first, then its additional contexts (the branch-wide ordering
-    // for plugin-sourced context).
-    const [prompt, context] = options.messages.slice(-2)
+    // rc.2 appends the pre-step's additional contexts BEFORE the admitted
+    // prompt, so the reference context precedes the direct user message in
+    // both the durable log and the transcript the TUI renders.
+    const [context, prompt] = options.messages.slice(-2)
     if (context?.role !== 'user' || prompt?.role !== 'user'
-      || prompt.content[0]?.type !== 'text' || prompt.content[0].text !== 'Use @Source session') {
-      throw new Error('session reference context did not follow the direct user message')
+      || prompt.source?.kind !== 'user'
+      || prompt.content[0]?.type !== 'text' || prompt.content[0].text !== 'Use @Source session'
+      || context.source?.kind !== 'session-reference') {
+      throw new Error('session reference context did not precede the direct user message')
     }
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'text-delta', index: 0, text: 'Combined reference request accepted.' }
@@ -59,6 +62,8 @@ describe('TUI session-reference snapshot', () => {
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRegistry)
     await ctx.plugin(AgentRegistry)
+    // rc.2: AgentLoop injects the projection registry for turn-boundary state.
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(CommandService)
     await ctx.plugin(UserQuestionService)
     await ctx.plugin(TuiPromptService)

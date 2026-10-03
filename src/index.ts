@@ -907,6 +907,13 @@ export function createTuiChat(
       // header; every other kind appends an explicit notice.
       case 'turn/end': {
         clearStreaming()
+        // A replayed log can leave seed steps attached with no body (a
+        // step/start whose turn never produced a message, later replaced by a
+        // live attempt at other coordinates). A closing turn retires every
+        // unsettled, bodyless step it owns — settled content stays rendered.
+        for (const step of assistantSteps.get(event.data.turn) ?? []) {
+          if (!step.isSettled() && !step.hasVisibleBody()) removeStreaming(step)
+        }
         const reason = event.data.reason
         switch (reason.kind) {
           case 'completed':
@@ -984,6 +991,7 @@ export function createTuiChat(
     agent,
     resolved,
     palette,
+    mdTheme,
     overlayManager,
     requestRender,
     isDisposed,
@@ -1143,6 +1151,27 @@ export function createTuiChat(
       if (detailsOverlay === session) detailsOverlay = undefined
     })
     requestRender()
+  }
+
+  // `/theme` names the same palette the terminal's color-scheme report drives,
+  // so a user can pin dark or light when their terminal does not report (or
+  // reports a scheme they disagree with).
+  const runTheme = (rawInput: string): CommandResult => {
+    const argument = rawInput.trim()
+    if (argument === '') {
+      appendNotice(`Current theme: ${currentScheme}. Pass "dark" or "light" to switch.`)
+      return { kind: 'success' }
+    }
+    if (argument !== 'dark' && argument !== 'light') {
+      return { kind: 'error', text: 'Unknown /theme argument. Usage: /theme [dark|light]' }
+    }
+    if (argument === currentScheme) {
+      appendNotice(`The theme is already ${currentScheme}.`)
+      return { kind: 'success' }
+    }
+    applyColorScheme(argument)
+    appendNotice(`Theme switched to ${argument}.`)
+    return { kind: 'success' }
   }
 
   // `/details` names the same transcript-detail state the Ctrl+O cycle and
@@ -1372,6 +1401,12 @@ export function createTuiChat(
       name: 'palette',
       description: 'Show every color and attribute role this terminal renders',
       handler: () => { showPalette(); return { kind: 'success' } },
+    })
+    commandCtx.commands.register({
+      name: 'theme',
+      description: 'Show or switch the transcript palette',
+      input: { hint: '[dark|light]' },
+      handler: ({ rawInput }) => runTheme(rawInput),
     })
     commandCtx.commands.register({
       name: 'reload',
