@@ -54,6 +54,15 @@
     - id: session-reference
       name: '@deepseek-ai/dsh-session-reference'
 
+    # Durable workspace records and the registry-global archive set. The resume
+    # selector reads the archive set to hide removed sessions and writes it from
+    # the picker's Ctrl+D — the delete-without-data-loss path — while the Web
+    # surface mounts this same registry for its sidebar. It needs only base rows
+    # (storage/storage-json/storage-domain, session persistence), and the TUI
+    # reads it optionally, so removing this row degrades to no archived scope.
+    - id: workspace
+      name: '@deepseek-ai/dsh-workspace'
+
     - id: tmux-context
       name: '@deepseek-ai/dsh-tmux-context'
       config:

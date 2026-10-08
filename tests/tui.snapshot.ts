@@ -55,6 +55,7 @@ const CHECKPOINTS = [
   'details-selector',
   'untrusted-controls',
   'plan-review-dialog',
+  'approval-dialog',
   'question-dialog',
   'question-dialog-detail-paged',
   'question-dialog-paged',
@@ -72,6 +73,7 @@ const CHECKPOINTS = [
   'resume-sessions-loading',
   'resume-sessions',
   'resume-sessions-all-workspaces',
+  'resume-sessions-archived',
   'status-diagnostics',
   'status-diagnostics-narrow',
   'todo-plan-cleared',
@@ -794,6 +796,33 @@ describe('TUI terminal-state snapshots', () => {
     nowSpy.mockRestore()
   })
 
+  it('pins the approval panel with its reason, argument preview, and decisions', async () => {
+    const harness = await setupSnapshot({}, { columns: 92, rows: 30 })
+    const beforeQuestion = harness.terminal.frames
+    harness.session.append('tool/call', {
+      turn: 1,
+      step: 1,
+      callId: ToolCallId('approval-call'),
+      name: 'bash',
+      arguments: JSON.stringify({ command: 'rm -rf build && pnpm install' }),
+    })
+    const outcome = harness.agent.ctx.waterfall(
+      'approval/request',
+      {
+        agent: harness.agent,
+        toolName: 'bash',
+        callId: ToolCallId('approval-call'),
+        reason: 'The command writes outside the workspace sandbox',
+      } as never,
+      () => Promise.resolve('unavailable' as const),
+    )
+    await harness.terminal.waitForFrame(beforeQuestion)
+    await checkpoint('approval-dialog', harness.terminal)
+    await renderAfter(harness, () => { harness.terminal.send('\r') })
+    await expect(outcome).resolves.toBe('allowed-once')
+    await disposeSnapshot(harness)
+  })
+
   it('pins the plan-review dialog with its markdown plan and accent approve option', async () => {
     const harness = await setupSnapshot({}, { columns: 92, rows: 30 })
     const controller = new AbortController()
@@ -1042,8 +1071,16 @@ describe('TUI terminal-state snapshots', () => {
     const listGate = Promise.withResolvers<undefined>()
     // Rows show metadata activity (here the created-at fallback: the fake
     // store locates no per-session artifact to stat) plus each log's one
-    // batch-folded title; nothing else is read from the logs.
+    // batch-folded title; nothing else is read from the logs. The registry
+    // hides one session so the archived scope has a row to pin.
     const harness = await setupSnapshot({
+      configureContext: async (ctx) => {
+        await ctx.plugin(SystemPrompt)
+        await ctx.plugin(ToolRegistry)
+        ctx.provide('workspaceRegistry', {
+          archivedSessionIds: [elsewhere.id],
+        } as never)
+      },
       sessionPersistence: {
         list: async () => {
           await listGate.promise
@@ -1074,6 +1111,13 @@ describe('TUI terminal-state snapshots', () => {
     await new Promise(resolve => setTimeout(resolve, 60))
     await harness.terminal.flush()
     await checkpoint('resume-sessions-all-workspaces', harness.terminal, { includeScrollback: true })
+    // The archived scope: one more Tab reaches it from the all-workspaces
+    // scope, and it lists exactly the registry-hidden rows the other scopes
+    // exclude (restore lives here).
+    harness.terminal.send('\t')
+    await new Promise(resolve => setTimeout(resolve, 60))
+    await harness.terminal.flush()
+    await checkpoint('resume-sessions-archived', harness.terminal, { includeScrollback: true })
     await disposeSnapshot(harness)
     dateNow.mockRestore()
   })

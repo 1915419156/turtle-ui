@@ -17,6 +17,9 @@ import type {
   SessionQueryEngine,
   SessionRecord,
 } from '@deepseek-ai/dsh-session-query'
+// The registry is optional (mounted only where a grouping surface exists), so
+// its type is imported for the Context augmentation and read non-strictly.
+import type WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import type { HintEditor } from './helpers.ts'
 import { formatCwd } from './helpers.ts'
 import type { TuiOverlaySession } from '../extension/types.ts'
@@ -24,7 +27,9 @@ import type { TuiRuntime } from '../runtime.ts'
 import {
   ResumePicker,
   summarizeResumeCandidate,
+  type ResumeArchiveRequest,
   type ResumeCandidate,
+  type ResumeScope,
 } from '../components/dialogs.ts'
 import type { ChannelNotice, ChatChannelDeps } from './channel.ts'
 
@@ -39,6 +44,12 @@ export interface ResumeControllerDeps extends ChatChannelDeps, ChannelNotice {
    * construction can be `undefined` even though the service arrives moments later.
    */
   readonly sessionQuery: (this: void) => SessionQueryEngine | undefined
+  /**
+   * The optional workspace registry, re-read at each use for the same ordering
+   * reason. It owns the durable archive set the picker's archived scope lists
+   * and where Ctrl+D hides or restores a session without deleting its log.
+   */
+  readonly workspaceRegistry: (this: void) => WorkspaceRegistry | undefined
   readonly ui: TUI
   readonly editor: HintEditor
   /** Current agent status, re-read at each resume precondition point. */
@@ -48,7 +59,9 @@ export interface ResumeControllerDeps extends ChatChannelDeps, ChannelNotice {
 /** Session-resume controller for one chat channel. */
 export interface ResumeController {
   /** Open the searchable session selector, scoped to this workspace until the user widens it. */
-  showResume(): void
+  showResume(scope?: ResumeScope): void
+  /** Hand this process off to a fresh session in the current workspace. */
+  startNew(): void
 }
 
 /**
@@ -59,7 +72,7 @@ export interface ResumeController {
 export function createResumeController(deps: ResumeControllerDeps): ResumeController {
   const {
     ctx, agent, runtime, resolved, palette, overlayManager,
-    sessionQuery, ui, editor,
+    sessionQuery, workspaceRegistry, ui, editor,
   } = deps
   let resumeOverlay: TuiOverlaySession | undefined
   let resumeInFlight = false
@@ -74,14 +87,17 @@ export function createResumeController(deps: ResumeControllerDeps): ResumeContro
     record: SessionRecord,
     title: string | undefined,
     lastActivityAt: number | undefined,
-  ): ResumeCandidate => summarizeResumeCandidate(
-    record,
-    title,
-    lastActivityAt,
-    agent.session.id,
-    agent.session.header.cwd,
-    workspaceLabel,
-  )
+  ): ResumeCandidate => ({
+    ...summarizeResumeCandidate(
+      record,
+      title,
+      lastActivityAt,
+      agent.session.id,
+      agent.session.header.cwd,
+      workspaceLabel,
+    ),
+    archived: ctx.get('workspaceRegistry', false)?.archivedSessionIds.includes(record.header.id) === true,
+  })
 
   /** The disabled fallback row for a session whose title read failed. */
   const unreadableCandidate = (
@@ -94,6 +110,7 @@ export function createResumeController(deps: ResumeControllerDeps): ResumeContro
     lastActivityAt: lastActivityAt ?? record.header.createdAt,
     currentWorkspace: record.header.cwd === agent.session.header.cwd,
     workspaceLabel: workspaceLabel(record.header.cwd),
+    archived: ctx.get('workspaceRegistry', false)?.archivedSessionIds.includes(record.header.id) === true,
     disabledReason: `session cannot be loaded: ${errorChain(error)}`,
   })
 
@@ -276,8 +293,68 @@ export function createResumeController(deps: ResumeControllerDeps): ResumeContro
     }
   }
 
+  /**
+   * Hand the process off to a fresh session in the current workspace. The
+   * replacement starts blank, so this is the one handoff that needs no
+   * preflight against a stored log — but it still requires an idle agent, the
+   * host capability, and a recorded workspace for the replacement's tools.
+   */
+  const handoffNew = async (): Promise<void> => {
+    if (resumeInFlight) return
+    resumeInFlight = true
+    let terminalReleased = false
+    try {
+      const status = deps.agentStatus()
+      if (status !== 'idle') throw new Error(`Starting a new session requires an idle agent (status: ${status}).`)
+      const hostHandoff = runtime.handoffNew
+      if (hostHandoff === undefined) {
+        deps.appendNotice('This host cannot start a fresh session in place.', 'warning')
+        return
+      }
+      const cwd = agent.session.header.cwd ?? process.cwd()
+      if (deps.isDisposed()) return
+      await ctx.sessions.flush(agent.session)
+      if (deps.isDisposed()) return
+      if (agent.status !== 'idle') throw new Error(`Starting a new session requires an idle agent (status: ${agent.status}).`)
+      await resumeOverlay?.close()
+      resumeOverlay = undefined
+      await runtime.terminal.drainInput(100, 20)
+      if (deps.isDisposed()) return
+      ui.stop()
+      terminalReleased = true
+      await hostHandoff(cwd)
+      throw new Error('resume host returned without replacing the process')
+    } catch (error: unknown) {
+      if (!deps.isDisposed()) {
+        if (terminalReleased) {
+          ui.start()
+          ui.setFocus(editor)
+          deps.appendNotice(`New session handoff failed: ${errorChain(error)}`, 'error')
+        } else {
+          deps.appendNotice(`New session failed: ${errorChain(error)}`, 'error')
+        }
+      }
+    } finally {
+      resumeInFlight = false
+    }
+  }
+
+  /**
+   * Archive or restore one session through the workspace registry and answer
+   * with the durable archive set. The registry rejects an archive request for a
+   * session with running work, which is the picker's "still live" error.
+   */
+  const setArchived = async ({ candidate, archived }: ResumeArchiveRequest): Promise<readonly SessionId[]> => {
+    const registry = workspaceRegistry()
+    /* v8 ignore next -- the picker hides the action without the registry, so this path needs a race */
+    if (registry === undefined) throw new Error('Archiving needs the workspace registry, which this composition does not mount.')
+    if (archived) await registry.archiveSession(candidate.record.header.id)
+    else await registry.unarchiveSession(candidate.record.header.id)
+    return [...registry.archivedSessionIds]
+  }
+
   return {
-    showResume(): void {
+    showResume(scope: ResumeScope = 'workspace'): void {
       if (agent.status !== 'idle') {
         deps.appendNotice('Resume requires the current turn to finish or be cancelled first.', 'warning')
         return
@@ -287,7 +364,14 @@ export function createResumeController(deps: ResumeControllerDeps): ResumeContro
         deps.appendNotice('Resume is not available: session query is not mounted.', 'warning')
         return
       }
+      if (scope === 'archived' && workspaceRegistry() === undefined) {
+        deps.appendNotice('Archived sessions need the workspace registry, which this composition does not mount.', 'warning')
+        return
+      }
       const scan = ++resumeScan
+      // The archived scope exists only where the registry does; an unbacked
+      // Ctrl+D would promise a capability the composition cannot serve.
+      const archiveAction = workspaceRegistry() === undefined ? undefined : setArchived
       void resumeOverlay?.close()
       // The picker opens before the scan settles so the terminal stops feeding
       // the editor immediately; a queued activation (the closing predecessor
@@ -305,6 +389,9 @@ export function createResumeController(deps: ResumeControllerDeps): ResumeContro
             palette,
             (candidate) => { void handoffResume(candidate, session) },
             () => { void session.close() },
+            archiveAction,
+            () => { void handoffNew() },
+            scope,
           )
           return picker
         },
@@ -361,6 +448,9 @@ export function createResumeController(deps: ResumeControllerDeps): ResumeContro
         void session.close()
         deps.appendNotice(`Resume session scan failed: ${errorChain(error)}`, 'error')
       })
+    },
+    startNew(): void {
+      void handoffNew()
     },
   }
 }

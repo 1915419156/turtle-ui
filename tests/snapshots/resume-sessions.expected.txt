@@ -16,9 +16,9 @@ buffer
 5| "  ╰──────────────────────────────────────────────────────────────────────────────────────╯  "
   style 2-89 dim
 6| "                                                                                            "
-7| "  this workspace /workspace/project  ⇥ all workspaces (3)                                   "
+7| "  this workspace /workspace/project  ⇥ all workspaces (2)  archived (1)                     "
   style 2-34 fg=bright-magenta
-  style 35-56 dim
+  style 35-70 dim
 8| "                                                                                            "
 9| "  ❯ Untitled session                                                                        "
   style 2-19 fg=bright-magenta bold
@@ -45,6 +45,6 @@ buffer
 27| "                                                                                            "
 28| "                                                                                            "
 29| "                                                                                            "
-30| "  Type to search  •  ↑/↓ navigate  •  Tab scope  •  Enter resume  •  Esc clear/cancel       "
-  style 2-84 dim
+30| "  ^D archive  •  ^N new  •  ↵ resume  •  Tab scope  •  Esc cancel                           "
+  style 2-64 dim
 31| "                                                                                            "

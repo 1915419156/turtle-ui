@@ -56,6 +56,11 @@ import type { SkillRegistry } from '@deepseek-ai/dsh-skill'
 // Type import declaration-merges the `userQuestions` service onto `Context`;
 // the ask-user-question queue is registered by ./chat/questions.
 import type {} from '@deepseek-ai/dsh-user-questions'
+// Type import declaration-merges the `approval/request` waterfall and the
+// `approval/asked`/`approval/decided` audit events; the approval answerer is
+// registered by ./chat/approval. Both seams are optional compositions, so the
+// package stays an optional peer and the queue is inert without them.
+import type {} from '@deepseek-ai/dsh-user-approval'
 import {
   TuiExtensionServiceImpl,
   TuiOverlayManager,
@@ -141,6 +146,7 @@ import {
   type ModelController,
 } from './chat/model-command.ts'
 import { createQuestionQueue } from './chat/questions.ts'
+import { createApprovalQueue } from './chat/approval.ts'
 import { createResumeController } from './chat/resume.ts'
 import type { TuiResumeHost, TuiRuntime } from './runtime.ts'
 import { WorkspaceFileSearch } from './chat/file-autocomplete.ts'
@@ -219,24 +225,14 @@ export interface MainSessionIdentity {
  */
 export const MAIN_SESSION_ID_KEY = 'mainSessionId'
 
-/**
- * Context key a launcher sets before any Loader entry mounts
- * (`ctx.provide(TUI_GOODBYE_MESSAGE_KEY, line)`) to supply the line the TUI
- * prints once the terminal is released on exit — for the shipped CLI, the
- * command that resumes this session. The launcher owns the wording because only
- * it knows how it was invoked; the TUI escapes terminal controls before
- * rendering. Absent prints nothing.
- */
-export const TUI_GOODBYE_MESSAGE_KEY = 'tuiGoodbyeMessage'
-
-/**
- * Context key a launcher sets before any Loader entry mounts
- * (`ctx.provide(INITIAL_SKILL_KEY, name)`) to seed a fresh session's first user
- * turn with `/skill:<name>` — the `dsh migrate`/`dsh upgrade`
- * guided-session entry. The launcher sets it only when minting a fresh session,
- * so it never re-fires on a resumed one. Absent leaves the first turn to the user.
- */
-export const INITIAL_SKILL_KEY = 'tuiInitialSkill'
+// The launcher-side host keys are declared once in ./host-keys so this reader
+// and the startup provider that supplies them cannot drift; re-exported here
+// for consumers that import them from the package entry.
+export {
+  INITIAL_SKILL_KEY,
+  TUI_GOODBYE_MESSAGE_KEY,
+  TUI_RESUME_HOST_KEY,
+} from './host-keys.ts'
 
 /**
  * Optional terminal-local interaction service provided by one mounted TUI.
@@ -1005,6 +1001,24 @@ export function createTuiChat(
     },
   })
 
+  const approvals = createApprovalQueue({
+    ctx,
+    agent,
+    resolved,
+    palette,
+    overlayManager,
+    requestRender,
+    isDisposed,
+    approvalMaxHeight: () => {
+      const width = runtime.terminal.columns
+      const editorRows = editor.render(width).length
+      return Math.max(1, Math.min(
+        resolved.questionDialogMaxHeight,
+        runtime.terminal.rows - editorRows,
+      ))
+    },
+  })
+
   const resume = createResumeController({
     ctx,
     agent,
@@ -1019,6 +1033,13 @@ export function createTuiChat(
       const implementation = ctx.reflect._getImpl('sessionQuery', false)
       if (implementation === undefined || implementation.fiber.state >= FIBER_FAILED) return undefined
       return ctx.get('sessionQuery', false)
+    },
+    // The archive set lives in the workspace registry, mounted only where a
+    // grouping surface exists; without it the picker hides the archived scope.
+    workspaceRegistry: () => {
+      const implementation = ctx.reflect._getImpl('workspaceRegistry', false)
+      if (implementation === undefined || implementation.fiber.state >= FIBER_FAILED) return undefined
+      return ctx.get('workspaceRegistry', false)
     },
     ui,
     editor,
@@ -1041,9 +1062,11 @@ export function createTuiChat(
       await tuiServiceFiber?.dispose()
       tuiServiceFiber = undefined
       questions.rejectAll()
+      approvals.rejectAll()
       await overlayManager.dispose()
       modelController.clearOverlay()
       questions.unregister()
+      approvals.unregister()
       await runtime.terminal.drainInput(100, 20)
       ui.stop()
       if (exitProcess) {
@@ -1415,8 +1438,21 @@ export function createTuiChat(
     })
     commandCtx.commands.register({
       name: 'resume',
-      description: 'List this workspace\'s resumable sessions',
-      handler: () => { resume.showResume(); return { kind: 'success' } },
+      description: 'List this workspace\'s resumable sessions (archive, restore, or start new)',
+      input: { hint: '[--archived]' },
+      handler: ({ rawInput }) => {
+        const argument = rawInput.trim()
+        if (argument !== '' && argument !== '--archived') {
+          return { kind: 'error', text: `Unknown /resume argument "${argument}". Usage: /resume [--archived]` }
+        }
+        resume.showResume(argument === '--archived' ? 'archived' : 'workspace')
+        return { kind: 'success' }
+      },
+    })
+    commandCtx.commands.register({
+      name: 'new',
+      description: 'Start a fresh session in this workspace',
+      handler: () => { resume.startNew(); return { kind: 'success' } },
     })
     commandCtx.commands.register({
       name: 'status',
@@ -1897,6 +1933,7 @@ export function createTuiChat(
     )
     clearStatus()
     questions.unregister()
+    approvals.unregister()
     ui.stop()
     throw error
   }
@@ -1909,8 +1946,12 @@ export function createTuiChat(
   // invoke the named skill exactly as a typed `/skill:<name>` would, once the
   // chat is live and the agent is idle. The launcher sets this only for a fresh
   // session, so there is no prior turn to collide with; invokeSkill reports an
-  // unknown skill as a notice.
-  if (config.initialSkill !== undefined) invokeSkill(config.initialSkill, '')
+  // unknown skill as a notice. The value may arrive from config or the
+  // `tuiInitialSkill` host key, both of which bypass the CLI's own trimming, so
+  // normalize at this single consumption point and treat a blank name as absent
+  // rather than reporting it as an unknown skill.
+  const seededSkill = config.initialSkill?.trim()
+  if (seededSkill !== undefined && seededSkill !== '') invokeSkill(seededSkill, '')
 
   return {
     async dispose(): Promise<void> {
@@ -2001,6 +2042,7 @@ export function apply(ctx: Context, config: Config): void {
   // boundary from COLORTERM; an explicit theme value still wins.
   const truecolor = config.theme?.truecolor ?? ['truecolor', '24bit'].includes(process.env.COLORTERM ?? '')
   const resumeHost = ctx.get('tuiResumeHost')
+  const hostNew = resumeHost?.handoffNew
   const goodbyeMessage = ctx.get('tuiGoodbyeMessage')
   // The launcher seeds a guided fresh session's first turn through this key; a
   // config value still wins. Consumed in createTuiChat via config.initialSkill.
@@ -2013,7 +2055,10 @@ export function apply(ctx: Context, config: Config): void {
   ), {
     terminal: new ProcessTerminal(),
     exit: (code) => { disposeRootAndExit(ctx, code) },
-    ...resumeHost === undefined ? {} : { handoffResume: (sessionId, cwd) => resumeHost.handoff(sessionId, cwd) },
+    ...resumeHost === undefined ? {} : {
+      handoffResume: (sessionId, cwd) => resumeHost.handoff(sessionId, cwd),
+      ...hostNew === undefined ? {} : { handoffNew: (cwd: string) => hostNew(cwd) },
+    },
     ...goodbyeMessage === undefined ? {} : { goodbyeMessage },
   })
 }

@@ -43,7 +43,7 @@ import {
   type TuiRuntime,
 } from '../src/index.ts'
 import { WorkspaceFileSearch } from '../src/chat/file-autocomplete.ts'
-import { ResumePicker } from '../src/components/dialogs.ts'
+import { ResumePicker, type ResumeCandidate } from '../src/components/dialogs.ts'
 import { ATTRIBUTE_ROLES, brandText, COLOR_ROLES, createPalette, paletteSpec } from '../src/components/theme.ts'
 import {
   appendAssistant,
@@ -809,6 +809,146 @@ describe('goodbye message and /resume', () => {
     expect(rendered).toContain('No matching sessions.')
   })
 
+  describe('ResumePicker archive surface', () => {
+    const candidate = (
+      id: string,
+      options: { archived?: boolean; currentWorkspace?: boolean } = {},
+    ): ResumeCandidate => ({
+      record: {
+        header: { version: SESSION_FORMAT_VERSION, id: SessionId(id), createdAt: 1, cwd: '/workspace', isSeeded: false },
+        live: false,
+        persisted: true,
+      } as never,
+      title: id,
+      lastActivityAt: 1,
+      currentWorkspace: options.currentWorkspace ?? true,
+      workspaceLabel: '/workspace',
+      ...options.archived === undefined ? {} : { archived: options.archived },
+    })
+
+    const buildPicker = (options: {
+      candidates: readonly ResumeCandidate[]
+      setArchived?: (request: { candidate: ResumeCandidate; archived: boolean }) => Promise<readonly ReturnType<typeof SessionId>[]>
+      startNew?: () => void
+    }) => {
+      const calls: { candidate: ResumeCandidate; archived: boolean }[] = []
+      const picker = new ResumePicker(
+        options.candidates,
+        10,
+        '/workspace',
+        () => 30,
+        createPalette(false),
+        () => {},
+        () => {},
+        options.setArchived === undefined
+          ? undefined
+          : (request) => {
+            calls.push(request)
+            return options.setArchived?.(request) ?? Promise.resolve([])
+          },
+        options.startNew,
+      )
+      picker.focused = true
+      return { picker, calls }
+    }
+
+    it('cycles workspace -> all -> archived and splits hidden rows out of the ordinary scopes', () => {
+      const { picker } = buildPicker({
+        candidates: [candidate('visible'), candidate('hidden', { archived: true })],
+        setArchived: () => Promise.resolve([]),
+      })
+      const scopeLine = () => picker.render(80).find(line => line.includes('⇥')) ?? ''
+      expect(scopeLine()).toContain('this workspace')
+      expect(picker.render(80).join('\n')).toContain('visible')
+      expect(picker.render(80).join('\n')).not.toContain('hidden')
+      picker.handleInput('\t')
+      expect(scopeLine()).toContain('all workspaces')
+      picker.handleInput('\t')
+      expect(scopeLine()).toContain('archived (1)')
+      const archivedView = picker.render(80).join('\n')
+      expect(archivedView).toContain('hidden')
+      expect(archivedView).not.toContain('visible')
+      // Enter on the archived scope refuses rather than handing off.
+      picker.handleInput('\r')
+      expect(picker.render(80).join('\n')).toContain('Restore the session with Ctrl+D before resuming it.')
+    })
+
+    it('restores instead of archiving while the archived scope is active', async () => {
+      const { picker, calls } = buildPicker({
+        candidates: [candidate('hidden', { archived: true })],
+        setArchived: () => Promise.resolve([]),
+      })
+      picker.handleInput('\t')
+      picker.handleInput('\t')
+      picker.handleInput('\x04')
+      await Promise.resolve()
+      expect(calls).toEqual([{ candidate: expect.objectContaining({ title: 'hidden' }), archived: false }])
+    })
+
+    it('never archives the live current session and reports registry failures', async () => {
+      const current = candidate('current')
+      current.disabledReason = 'current session'
+      const refusing = buildPicker({
+        candidates: [current],
+        setArchived: () => Promise.resolve([]),
+      })
+      refusing.picker.handleInput('\x04')
+      expect(refusing.calls).toEqual([])
+      expect(refusing.picker.render(80).join('\n')).toContain('The current session cannot be archived.')
+
+      const failing = buildPicker({
+        candidates: [candidate('boom')],
+        setArchived: () => Promise.reject(new Error('registry refused')),
+      })
+      failing.picker.handleInput('\x04')
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(failing.picker.render(80).join('\n')).toContain('registry refused')
+    })
+
+    it('reflects the registry answer rather than the request and keeps the selected row', async () => {
+      const rows = [candidate('first'), candidate('second'), candidate('other')]
+      const { picker } = buildPicker({
+        candidates: rows,
+        // A concurrent surface archived 'other' first; the answer set is the
+        // authority, so the selection stays on 'second' while 'other' moves out
+        // of the ordinary scope.
+        setArchived: () => Promise.resolve([SessionId('other')]),
+      })
+      picker.handleInput('\x1b[B')
+      picker.handleInput('\x04')
+      await Promise.resolve()
+      await Promise.resolve()
+      const rendered = picker.render(80).join('\n')
+      expect(rendered).toContain('second')
+      expect(rendered).toContain('archived (1)')
+      expect(rendered).not.toContain('other')
+    })
+
+    it('reports the archived capability unavailable without a registry action', () => {
+      const { picker } = buildPicker({ candidates: [candidate('only')] })
+      const scopeLine = () => picker.render(80).find(line => line.includes('⇥')) ?? ''
+      picker.handleInput('\t')
+      // Two scopes only: Tab returns to the workspace scope.
+      expect(scopeLine()).toContain('this workspace')
+      picker.handleInput('\x04')
+      // The rendered line is width-truncated, so assert the stable lead.
+      expect(picker.render(80).join('\n'))
+        .toContain('Archiving needs the workspace registry')
+    })
+
+    it('starts a fresh session on Ctrl+N and reports the missing capability', () => {
+      const startNew = vi.fn()
+      const { picker } = buildPicker({ candidates: [candidate('only')], startNew })
+      picker.handleInput('\x0e')
+      expect(startNew).toHaveBeenCalledTimes(1)
+      const missing = buildPicker({ candidates: [candidate('only')] })
+      missing.picker.handleInput('\x0e')
+      expect(missing.picker.render(80).join('\n'))
+        .toContain('Starting a fresh session in place needs the launcher host.')
+    })
+  })
+
   it('aborts an in-flight scan when the loading picker is dismissed', async () => {
     const listing = Promise.withResolvers<SessionRecord[]>()
     let scanSignal: AbortSignal | undefined
@@ -1556,6 +1696,235 @@ describe('goodbye message and /resume', () => {
     expect(handoff).not.toHaveBeenCalled()
     result.agent.status = 'idle'
     await dispose(result)
+  })
+
+  describe('session archive and fresh sessions', () => {
+    /** Minimal registry-backed archive set the picker reads and writes. */
+    const fakeRegistry = (initial: string[] = []) => {
+      const archived = new Set(initial)
+      return {
+        get archivedSessionIds() { return [...archived] as ReturnType<typeof SessionId>[] },
+        archiveSession: vi.fn(async (id: string) => { archived.add(id) }),
+        unarchiveSession: vi.fn(async (id: string) => { archived.delete(id) }),
+      }
+    }
+
+    it('archives the selected session with Ctrl+D and hides it from the ordinary scopes', async () => {
+      const older = header('archive-me', 2000, '/workspace')
+      const newer = header('keep-me', 3000, '/workspace')
+      const registry = fakeRegistry()
+      const result = await setup({
+        cwd: '/workspace',
+        handoffResume: vi.fn(),
+        configureContext: async (ctx) => {
+          ctx.provide('tools', { get: () => undefined } as never)
+          ctx.provide('workspaceRegistry', registry as never)
+        },
+        sessionPersistence: {
+          list: async () => [older, newer],
+          load: async id => id === older.id
+            ? { meta: older, events: resumeEvents('Archive me') }
+            : { meta: newer, events: resumeEvents('Keep me') },
+        },
+      })
+      result.terminal.send('/resume')
+      result.terminal.send('\r')
+      await tick(); await tick()
+      result.terminal.send('Archive me')
+      await tick()
+      result.terminal.send('\x04')
+      await tick(); await tick()
+      expect(registry.archiveSession).toHaveBeenCalledWith(older.id)
+      // Clear the search so the list itself is asserted: the archived row is
+      // gone from the ordinary scope and the scope line counts it as archived.
+      result.terminal.send('\x1b')
+      await tick()
+      const afterArchive = result.terminal.output.slice(result.terminal.output.lastIndexOf('Resume session'))
+      expect(afterArchive).not.toContain('Archive me')
+      expect(afterArchive).toContain('Keep me')
+      expect(afterArchive).toContain('archived (1)')
+      // The archived scope lists exactly the hidden row.
+      result.terminal.send('\t')
+      await tick()
+      result.terminal.send('\t')
+      await tick()
+      expect(result.terminal.output).toContain('Archive me')
+      await dispose(result)
+    })
+
+    it('restores an archived session from the archived scope with Ctrl+D', async () => {
+      const archived = header('archived-one', 2000, '/workspace')
+      const registry = fakeRegistry(['archived-one'])
+      const result = await setup({
+        cwd: '/workspace',
+        handoffResume: vi.fn(),
+        configureContext: async (ctx) => {
+          ctx.provide('tools', { get: () => undefined } as never)
+          ctx.provide('workspaceRegistry', registry as never)
+        },
+        sessionPersistence: {
+          list: async () => [archived],
+          load: async () => ({ meta: archived, events: resumeEvents('Archived one') }),
+        },
+      })
+      // `/resume --archived` opens directly on the hidden set.
+      result.terminal.send('/resume --archived')
+      result.terminal.send('\r')
+      await tick(); await tick()
+      expect(result.terminal.output).toContain('archived (1)')
+      expect(result.terminal.output).toContain('Archived one')
+      result.terminal.send('\x04')
+      await tick(); await tick()
+      expect(registry.unarchiveSession).toHaveBeenCalledWith(archived.id)
+      expect(result.terminal.output).toContain('No archived sessions.')
+      await dispose(result)
+    })
+
+    it('refuses to resume an archived row until it is restored', async () => {
+      const archived = header('still-archived', 2000, '/workspace')
+      const handoff = vi.fn<NonNullable<TuiRuntime['handoffResume']>>()
+      const result = await setup({
+        cwd: '/workspace',
+        handoffResume: handoff,
+        configureContext: async (ctx) => {
+          ctx.provide('tools', { get: () => undefined } as never)
+          ctx.provide('workspaceRegistry', fakeRegistry(['still-archived']) as never)
+        },
+        sessionPersistence: {
+          list: async () => [archived],
+          load: async () => ({ meta: archived, events: resumeEvents('Still archived') }),
+        },
+      })
+      result.terminal.send('/resume --archived')
+      result.terminal.send('\r')
+      await tick(); await tick()
+      result.terminal.send('\r')
+      await tick()
+      expect(result.terminal.output).toContain('Restore the session with Ctrl+D before resuming it.')
+      expect(handoff).not.toHaveBeenCalled()
+      await dispose(result)
+    })
+
+    it('reports an archive failure from the registry without closing the picker', async () => {
+      const target = header('cannot-archive', 2000, '/workspace')
+      const registry = fakeRegistry()
+      registry.archiveSession.mockRejectedValueOnce(new Error('session has running work'))
+      const result = await setup({
+        cwd: '/workspace',
+        handoffResume: vi.fn(),
+        configureContext: async (ctx) => {
+          ctx.provide('tools', { get: () => undefined } as never)
+          ctx.provide('workspaceRegistry', registry as never)
+        },
+        sessionPersistence: {
+          list: async () => [target],
+          load: async () => ({ meta: target, events: resumeEvents('Cannot archive') }),
+        },
+      })
+      result.terminal.send('/resume')
+      result.terminal.send('\r')
+      await tick(); await tick()
+      // The default selection is the live current session, which refuses; select
+      // the target row first so the failure comes from the registry itself.
+      result.terminal.send('Cannot archive')
+      await tick()
+      result.terminal.send('\x04')
+      await tick(); await tick()
+      expect(result.terminal.output).toContain('session has running work')
+      // The picker itself is still open and usable.
+      expect(result.terminal.output.slice(result.terminal.output.lastIndexOf('Resume session')))
+        .toContain('Cannot archive')
+      await dispose(result)
+    })
+
+    it('warns instead of opening the archived scope when the registry is absent', async () => {
+      const result = await setup({ cwd: '/workspace' })
+      result.terminal.send('/resume --archived')
+      result.terminal.send('\r')
+      await tick(); await tick()
+      expect(result.terminal.output)
+        .toContain('Archived sessions need the workspace registry, which this composition does not mount.')
+      await dispose(result)
+    })
+
+    it('omits the archived scope and reports Ctrl+D unavailable without the registry', async () => {
+      const target = header('no-registry', 2000, '/workspace')
+      const result = await setup({
+        cwd: '/workspace',
+        handoffResume: vi.fn(),
+        sessionPersistence: {
+          list: async () => [target],
+          load: async () => ({ meta: target, events: resumeEvents('No registry') }),
+        },
+      })
+      result.terminal.send('/resume')
+      result.terminal.send('\r')
+      await tick(); await tick()
+      expect(result.terminal.output).not.toContain('archived (')
+      result.terminal.send('\t')
+      await tick()
+      // Two scopes only: Tab returns to the workspace scope rather than landing
+      // on an archived scope this composition cannot serve.
+      expect(result.terminal.output.slice(result.terminal.output.lastIndexOf('Resume session')))
+        .toContain('this workspace')
+      await dispose(result)
+    })
+
+    it('hands off to a fresh session in the current workspace with /new', async () => {
+      const handoffNew = vi.fn<NonNullable<TuiRuntime['handoffNew']>>(
+        () => Promise.reject(new Error('test host retained process')),
+      )
+      const result = await setup({ cwd: '/workspace', handoffNew })
+      result.terminal.send('/new')
+      result.terminal.send('\r')
+      await tick(); await tick()
+      expect(handoffNew).toHaveBeenCalledWith('/workspace')
+      await dispose(result)
+    })
+
+    it('starts a fresh session from the picker with Ctrl+N', async () => {
+      const target = header('ctrl-n-target', 2000, '/workspace')
+      const handoffNew = vi.fn<NonNullable<TuiRuntime['handoffNew']>>(
+        () => Promise.reject(new Error('test host retained process')),
+      )
+      const result = await setup({
+        cwd: '/workspace',
+        handoffResume: vi.fn(),
+        handoffNew,
+        sessionPersistence: {
+          list: async () => [target],
+          load: async () => ({ meta: target, events: resumeEvents('Ctrl N target') }),
+        },
+      })
+      result.terminal.send('/resume')
+      result.terminal.send('\r')
+      await tick(); await tick()
+      result.terminal.send('\x0e')
+      await tick(); await tick()
+      expect(handoffNew).toHaveBeenCalledWith('/workspace')
+      await dispose(result)
+    })
+
+    it('reports /new as unavailable when the host has no fresh-session handoff', async () => {
+      const result = await setup({ cwd: '/workspace' })
+      result.terminal.send('/new')
+      result.terminal.send('\r')
+      await tick(); await tick()
+      expect(result.terminal.output).toContain('This host cannot start a fresh session in place.')
+      await dispose(result)
+    })
+
+    it('refuses /new while the agent is running', async () => {
+      const handoffNew = vi.fn<NonNullable<TuiRuntime['handoffNew']>>()
+      const result = await setup({ cwd: '/workspace', status: 'running', handoffNew })
+      result.terminal.send('/new')
+      result.terminal.send('\r')
+      await tick(); await tick()
+      expect(result.terminal.output)
+        .toContain('Starting a new session requires an idle agent (status: running).')
+      expect(handoffNew).not.toHaveBeenCalled()
+      await dispose(result)
+    })
   })
 })
 
@@ -4624,6 +4993,22 @@ describe('skill slash command', () => {
     await tick()
     expect(result.agent.sent).toEqual([[{ type: 'text', text: '<skill name="demo-skill">\nDemo instructions body.\n</skill>' }]])
     await dispose(result)
+  })
+
+  it('normalizes a whitespace-padded seeded skill name and ignores a blank one', async () => {
+    // This entry bypasses the CLI parser (config or `tuiInitialSkill`), so the
+    // name is normalized at its single consumption point. Exact matching in
+    // invokeSkill means padding would otherwise read as an unknown skill.
+    const padded = await setup({ config: { initialSkill: '  demo-skill  ' }, configureContext: withSkills })
+    await tick()
+    expect(padded.agent.sent).toEqual([[{ type: 'text', text: '<skill name="demo-skill">\nDemo instructions body.\n</skill>' }]])
+    await dispose(padded)
+
+    const blank = await setup({ config: { initialSkill: '   ' }, configureContext: withSkills })
+    await tick()
+    expect(blank.agent.sent).toEqual([])
+    expect(blank.terminal.output).not.toContain('Unknown skill')
+    await dispose(blank)
   })
 
   it('reports an unknown initial skill as a notice without sending', async () => {

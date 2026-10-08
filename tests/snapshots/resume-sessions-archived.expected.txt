@@ -4,8 +4,8 @@ title "DSH snapshot"
 cursor hidden column=6 viewportRow=4 bufferRow=4
 buffer
 0| "                                                                                            "
-1| "  Resume session                                                                            "
-  style 2-15 fg=bright-magenta bold
+1| "  Resume session (1 of 1)                                                                   "
+  style 2-24 fg=bright-magenta bold
 2| "                                                                                            "
 3| "  ╭──────────────────────────────────────────────────────────────────────────────────────╮  "
   style 2-89 dim
@@ -16,14 +16,16 @@ buffer
 5| "  ╰──────────────────────────────────────────────────────────────────────────────────────╯  "
   style 2-89 dim
 6| "                                                                                            "
-7| "  this workspace /workspace/project  ⇥ all workspaces (0)  archived (0)                     "
-  style 2-34 fg=bright-magenta
-  style 35-70 dim
+7| "  archived (1)  ⇥ this workspace (2)  all workspaces (2)                                    "
+  style 2-13 fg=bright-magenta
+  style 14-55 dim
 8| "                                                                                            "
-9| "  Loading sessions…                                                                         "
-  style 2-18 dim
-10| "                                                                                            "
-11| "                                                                                            "
+9| "  ❯ Other workspace work                                                                    "
+  style 2-23 fg=bright-magenta bold
+10| "    2024-02-02T00:00:08.000Z · persisted · archived · elsewhere-session                     "
+  style 2-70 dim
+11| "    workspace /workspace/other                                                              "
+  style 2-29 dim
 12| "                                                                                            "
 13| "                                                                                            "
 14| "                                                                                            "
@@ -42,6 +44,6 @@ buffer
 27| "                                                                                            "
 28| "                                                                                            "
 29| "                                                                                            "
-30| "  ^D archive  •  ^N new  •  ↵ resume  •  Tab scope  •  Esc cancel                           "
-  style 2-64 dim
+30| "  ^D restore  •  ^N new  •  Tab scope  •  Esc cancel                                        "
+  style 2-51 dim
 31| "                                                                                            "

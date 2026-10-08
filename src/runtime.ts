@@ -23,6 +23,15 @@ export interface TuiResumeHost {
    *   teardown.
    */
   handoff(sessionId: SessionId, cwd: string): Promise<never>
+  /**
+   * Dispose the current app and replace it with a runtime for a fresh session
+   * in `cwd` — what a bare launcher invocation would start. Success does not
+   * return. Optional: a host that cannot start sessions in place omits it, and
+   * the terminal's `/new` reports the capability as unavailable.
+   * @param cwd - the workspace the fresh session must run in, which the
+   *   replacement process's tools resolve against.
+   */
+  handoffNew?(cwd: string): Promise<never>
 }
 
 /** Runtime boundary used by the interactive TUI. */
@@ -47,6 +56,8 @@ export interface TuiRuntime {
   now?(): number
   /** Host-owned process handoff; absent leaves the session selectable but not resumable in place. */
   handoffResume?: TuiResumeHost['handoff']
+  /** Host-owned in-place fresh-session handoff; absent leaves `/new` unavailable. */
+  handoffNew?: TuiResumeHost['handoffNew']
   /**
    * Line the host wants printed once the terminal is released on exit, such as
    * the command that resumes this session. Absent prints nothing. The host owns

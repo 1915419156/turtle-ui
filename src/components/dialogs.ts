@@ -513,6 +513,13 @@ export interface ResumeCandidate {
   /** The session's own workspace as a prompt-style label; the all-workspaces scope shows it per row. */
   workspaceLabel: string
   disabledReason?: string
+  /**
+   * Whether the registry's durable archive set hides this session from the
+   * ordinary scopes. Archiving is the delete-without-data-loss path, so an
+   * archived row is still listed — under the picker's archived scope, where it
+   * can be restored.
+   */
+  archived?: boolean
 }
 
 /**
@@ -553,16 +560,28 @@ export function summarizeResumeCandidate(
   }
 }
 
-/** Which workspaces the resume picker currently lists. */
-export type ResumeScope = 'workspace' | 'all'
+/** Which sessions the resume picker currently lists. */
+export type ResumeScope = 'workspace' | 'all' | 'archived'
+
+const RESUME_SCOPES: readonly ResumeScope[] = ['workspace', 'all', 'archived']
+
+/** One archive/unarchive request the picker hands to its owner. */
+export interface ResumeArchiveRequest {
+  readonly candidate: ResumeCandidate
+  /** Requested state: `true` archives, `false` restores. */
+  readonly archived: boolean
+}
 
 /**
  * Full-viewport keyboard selector over detached, preflighted resume summaries.
  *
- * Two scopes over one candidate set: `workspace` (the default) lists only the
+ * Three scopes over one candidate set: `workspace` (the default) lists only the
  * current session's workspace, `all` lists every workspace and labels each row
- * with its own. Tab toggles between them; the search query and selection reset
- * on a scope change so the highlighted row always belongs to the visible list.
+ * with its own, and `archived` lists the registry's hidden sessions — archived
+ * sessions are the delete-without-data-loss path, so the third scope both
+ * exposes them and is where Ctrl+D restores one. Tab cycles the scopes; the
+ * search query and selection reset on a scope change so the highlighted row
+ * always belongs to the visible list.
  *
  * The picker opens before the session scan settles: an `undefined` candidate
  * set renders a loading placeholder that keeps input away from the editor,
@@ -573,6 +592,7 @@ export class ResumePicker implements Component, Focusable {
   private pasteBuffer: string | undefined
   private selectedIndex = 0
   private error = ''
+  private busy = false
   private scope: ResumeScope = 'workspace'
   private candidates: readonly ResumeCandidate[] | undefined
   focused = false
@@ -585,8 +605,19 @@ export class ResumePicker implements Component, Focusable {
     private readonly palette: Palette,
     private readonly done: (candidate: ResumeCandidate) => void,
     private readonly cancel: () => void,
+    /**
+     * Archive (`archived: true`) or restore (`false`) one session and resolve
+     * with the durable archive set. Optional: without it the picker hides the
+     * archived scope and Ctrl+D reports the capability as unavailable.
+     */
+    private readonly setArchived?: (request: ResumeArchiveRequest) => Promise<readonly SessionId[]>,
+    /** Start a fresh session in place; absent leaves `/new` unavailable. */
+    private readonly startNew?: () => void,
+    /** Initial scope, so `/resume --archived` can open directly on the archived set. */
+    initialScope: ResumeScope = 'workspace',
   ) {
     this.candidates = candidates
+    this.scope = initialScope
   }
 
   invalidate(): void {
@@ -605,12 +636,44 @@ export class ResumePicker implements Component, Focusable {
     this.invalidate()
   }
 
+  /**
+   * Replace the candidate set after a completed archive/unarchive, keeping the
+   * selected row's identity when it still exists and clearing the busy latch.
+   * @param candidates - the rescanned rows.
+   */
+  applyArchive(candidates: readonly ResumeCandidate[]): void {
+    const previous = this.filtered()[this.selectedIndex]?.record.header.id
+    this.busy = false
+    this.setCandidates(candidates)
+    const rows = this.filtered()
+    const restored = previous === undefined ? -1 : rows.findIndex(row => row.record.header.id === previous)
+    this.selectedIndex = restored >= 0 ? restored : Math.max(0, Math.min(this.selectedIndex, rows.length - 1))
+    this.invalidate()
+  }
+
+  /**
+   * Report a failed archive/unarchive and clear the busy latch.
+   * @param message - the reason shown under the list.
+   */
+  failArchive(message: string): void {
+    this.busy = false
+    this.error = message
+    this.invalidate()
+  }
+
   /** Candidates in the active scope, before the search query narrows them. */
   private scoped(): ResumeCandidate[] {
     const candidates = this.candidates ?? []
-    return this.scope === 'all'
-      ? [...candidates]
-      : candidates.filter(candidate => candidate.currentWorkspace)
+    switch (this.scope) {
+      case 'all':
+        // Archived sessions belong to the archived scope alone, so no ordinary
+        // scope can resurrect a session the user removed.
+        return candidates.filter(candidate => candidate.archived !== true)
+      case 'archived':
+        return candidates.filter(candidate => candidate.archived === true)
+      default:
+        return candidates.filter(candidate => candidate.currentWorkspace && candidate.archived !== true)
+    }
   }
 
   private filtered(): ResumeCandidate[] {
@@ -621,7 +684,7 @@ export class ResumePicker implements Component, Focusable {
     // joins the searchable text exactly in the scope that shows it.
     return scoped.filter(candidate => candidate.title.toLocaleLowerCase().includes(query)
       || candidate.record.header.id.toLocaleLowerCase().includes(query)
-      || (this.scope === 'all' && candidate.workspaceLabel.toLocaleLowerCase().includes(query)))
+      || (this.scope !== 'workspace' && candidate.workspaceLabel.toLocaleLowerCase().includes(query)))
   }
 
   private visibleCandidateCount(): number {
@@ -630,6 +693,57 @@ export class ResumePicker implements Component, Focusable {
     const rowHeight = this.scope === 'all' ? 4 : 3
     const candidateBudget = Math.max(1, Math.floor((Math.max(1, this.viewportRows()) - 13) / rowHeight))
     return Math.min(this.maxVisible, candidateBudget)
+  }
+
+  /**
+   * Archive the selected session, or restore it in the archived scope. The
+   * owner rescans and answers with the durable archive set; this picker only
+   * requests and reflects the outcome.
+   */
+  private toggleArchived(): void {
+    if (this.setArchived === undefined) {
+      this.error = 'Archiving needs the workspace registry, which this composition does not mount.'
+      return
+    }
+    if (this.busy) return
+    const selected = this.filtered()[this.selectedIndex]
+    if (this.candidates === undefined) this.error = 'Sessions are still loading.'
+    else if (selected === undefined) this.error = 'No session matches this search.'
+    else if (selected.disabledReason === 'current session') this.error = 'The current session cannot be archived.'
+    else {
+      this.busy = true
+      this.error = ''
+      const restoring = this.scope === 'archived'
+      this.setArchived({ candidate: selected, archived: !restoring }).then(
+        (archivedIds) => {
+          // The registry's answer decides the flags, not the request: another
+          // surface may have archived the same session concurrently.
+          const set = new Set(archivedIds)
+          this.applyArchive((this.candidates ?? []).map(candidate => ({
+            ...candidate,
+            archived: set.has(candidate.record.header.id),
+          })))
+        },
+        (reason: unknown) => {
+          this.failArchive(reason instanceof Error ? reason.message : String(reason))
+        },
+      )
+    }
+  }
+
+  /** The scopes this composition can serve: archived exists only with the registry. */
+  private availableScopes(): readonly ResumeScope[] {
+    return this.setArchived === undefined ? ['workspace', 'all'] : RESUME_SCOPES
+  }
+
+  /** Advance to the next scope this composition offers. */
+  private cycleScope(): void {
+    const available = this.availableScopes()
+    const index = available.indexOf(this.scope)
+    this.scope = available[(index + 1) % available.length] as ResumeScope
+    this.search.setValue('')
+    this.selectedIndex = 0
+    this.error = ''
   }
 
   private handleBracketedPaste(data: string): boolean {
@@ -665,6 +779,17 @@ export class ResumePicker implements Component, Focusable {
       this.cancel()
       return
     }
+    if (matchesKey(data, Key.ctrl('n'))) {
+      if (this.startNew === undefined) this.error = 'Starting a fresh session in place needs the launcher host.'
+      else this.startNew()
+      this.invalidate()
+      return
+    }
+    if (matchesKey(data, Key.ctrl('d'))) {
+      this.toggleArchived()
+      this.invalidate()
+      return
+    }
     if (matchesKey(data, Key.escape)) {
       if (this.search.getValue() === '') this.cancel()
       else {
@@ -686,13 +811,11 @@ export class ResumePicker implements Component, Focusable {
         this.selectedIndex + this.visibleCandidateCount(),
       )
     } else if (matchesKey(data, Key.tab)) {
-      this.scope = this.scope === 'workspace' ? 'all' : 'workspace'
-      this.search.setValue('')
-      this.selectedIndex = 0
-      this.error = ''
+      this.cycleScope()
     } else if (matchesKey(data, Key.enter)) {
       const selected = filtered[this.selectedIndex]
       if (this.candidates === undefined) this.error = 'Sessions are still loading.'
+      else if (this.scope === 'archived') this.error = 'Restore the session with Ctrl+D before resuming it.'
       else if (selected === undefined) this.error = 'No session matches this search.'
       else if (selected.disabledReason !== undefined) this.error = selected.disabledReason
       else this.done(selected)
@@ -710,18 +833,24 @@ export class ResumePicker implements Component, Focusable {
 
   /**
    * The scope line under the search box: the active scope with the current
-   * workspace it means, and the inactive scope with the count Tab would reveal.
+   * workspace it means, and the counts Tab would reach. The archived scope is
+   * listed only when the registry-backed archive action is available.
    */
   private renderScopeLine(): string {
     const candidates = this.candidates ?? []
-    const inWorkspace = candidates.filter(candidate => candidate.currentWorkspace).length
-    const active = this.scope === 'workspace'
-      ? `this workspace ${displayText(this.workspaceLabel)}`
-      : `all workspaces (${candidates.length})`
-    const other = this.scope === 'workspace'
-      ? `all workspaces (${candidates.length})`
-      : `this workspace (${inWorkspace})`
-    return `${this.palette.accent(active)}${this.palette.dim(`  ⇥ ${other}`)}`
+    const unarchived = candidates.filter(candidate => candidate.archived !== true)
+    const inWorkspace = unarchived.filter(candidate => candidate.currentWorkspace).length
+    const archived = candidates.length - unarchived.length
+    const labels: Record<ResumeScope, string> = {
+      workspace: `this workspace ${displayText(this.workspaceLabel)}`,
+      all: `all workspaces (${unarchived.length})`,
+      archived: `archived (${archived})`,
+    }
+    const active = labels[this.scope]
+    const others = this.availableScopes()
+      .filter(scope => scope !== this.scope)
+      .map(scope => scope === 'workspace' ? `this workspace (${inWorkspace})` : labels[scope])
+    return `${this.palette.accent(active)}${this.palette.dim(`  ⇥ ${others.join('  ')}`)}`
   }
 
   render(width: number): string[] {
@@ -771,13 +900,14 @@ export class ResumePicker implements Component, Focusable {
         candidate.disabledReason === 'current session' ? 'current' : undefined,
         candidate.record.live ? 'live' : undefined,
         candidate.record.persisted ? 'persisted' : undefined,
+        candidate.archived === true ? 'archived' : undefined,
       ].filter((value): value is string => value !== undefined).join(' · ')
       const lead = `${active ? '❯' : ' '} ${displayText(candidate.title)}`
       push(active ? this.palette.bold(this.palette.accent(lead)) : lead)
       push(this.palette.dim(`  ${new Date(candidate.lastActivityAt).toISOString()} · ${status} · ${displayText(candidate.record.header.id)}`))
-      // Only the all-workspaces scope mixes directories, so the per-row
-      // workspace is redundant in the scope that already names one.
-      if (this.scope === 'all') {
+      // Only the non-workspace scopes mix directories, so the per-row workspace
+      // is redundant in the scope that already names one.
+      if (this.scope !== 'workspace') {
         push(this.palette.dim(`  workspace ${displayText(candidate.workspaceLabel)}`))
       }
       if (candidate.disabledReason !== undefined) {
@@ -785,16 +915,188 @@ export class ResumePicker implements Component, Focusable {
       }
     }
     if (this.candidates === undefined) push(this.palette.dim('Loading sessions…'))
-    else if (filtered.length === 0) push(this.palette.warning('No matching sessions.'))
-    if (this.error !== '') {
+    else if (filtered.length === 0) {
+      push(this.palette.warning(this.scope === 'archived'
+        ? 'No archived sessions.'
+        : 'No matching sessions.'))
+    }
+    if (this.error !== '' && !this.busy) {
       lines.push('')
       push(this.palette.error(displayText(this.error)))
     }
 
-    const footer = `${indent}${this.palette.dim('Type to search  •  ↑/↓ navigate  •  Tab scope  •  Enter resume  •  Esc clear/cancel')}`
+    const controls = [
+      'Type to search',
+      '↑/↓ navigate',
+      'Tab scope',
+      this.scope === 'archived' ? 'Ctrl+D restore' : 'Ctrl+D archive',
+      'Ctrl+N new',
+      ...(this.scope === 'archived' ? [] : ['Enter resume']),
+      'Esc clear/cancel',
+    ]
+    const full = controls.join('  •  ')
+    const terse = [
+      ...(this.scope === 'archived' ? ['^D restore'] : ['^D archive']),
+      '^N new',
+      ...(this.scope === 'archived' ? [] : ['↵ resume']),
+      'Tab scope',
+      'Esc cancel',
+    ].join('  •  ')
+    const line = this.busy
+      ? 'Working…'
+      : visibleWidth(full) <= contentWidth ? full : visibleWidth(terse) <= contentWidth ? terse : '^D  ^N  Tab  ↵  Esc'
+    const footer = `${indent}${this.palette.dim(line)}`
     while (lines.length < height - 2) lines.push('')
     lines.push(footer, '')
     return lines.slice(0, height)
+  }
+}
+
+/** The user's decision on one approval request. */
+export type ApprovalChoice = 'allowed-once' | 'rejected'
+
+interface ApprovalOption {
+  label: string
+  description: string
+  choice: ApprovalChoice
+}
+
+const APPROVAL_OPTIONS: readonly ApprovalOption[] = [
+  {
+    label: 'Allow once',
+    description: 'Run this one call; the next request asks again',
+    choice: 'allowed-once',
+  },
+  {
+    label: 'Reject',
+    description: 'Block this call; the model sees the rejection',
+    choice: 'rejected',
+  },
+]
+
+/**
+ * Inline dialog for one tool approval request: what the tool wants to do, why
+ * it is asking, and the one-shot grant or rejection. Escape refuses the call
+ * rather than withdrawing the question, because a dismissed prompt must fail
+ * closed.
+ */
+export class ApprovalDialog implements Component, Focusable {
+  private selectedIndex = 0
+  focused = false
+
+  constructor(
+    private readonly toolName: string,
+    private readonly reason: string | undefined,
+    private readonly detail: string | undefined,
+    private readonly maxHeight: () => number,
+    private readonly palette: Palette,
+    private readonly done: (choice: ApprovalChoice) => void,
+    private readonly cancel: () => void,
+  ) {}
+
+  invalidate(): void {}
+
+  handleInput(data: string): void {
+    if (matchesKey(data, Key.up) || matchesKey(data, Key.down) || matchesKey(data, Key.tab)) {
+      this.selectedIndex = this.selectedIndex === 0 ? 1 : 0
+    } else if (matchesKey(data, Key.enter)) {
+      this.done(APPROVAL_OPTIONS[this.selectedIndex]?.choice ?? 'rejected')
+    } else if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl('c'))) {
+      this.cancel()
+    }
+  }
+
+  render(width: number): string[] {
+    const horizontalPadding = Math.min(2, Math.max(0, Math.floor((width - 1) / 2)))
+    const innerWidth = Math.max(1, width - horizontalPadding * 2)
+    const maxHeight = this.maxHeight()
+
+    const optionLines = APPROVAL_OPTIONS
+      .map((option, index) => this.renderOption(option, index, innerWidth))
+      .flat()
+    const footer = this.palette.dim(truncateToWidth(
+      '↑/↓ move • Enter confirm • Esc reject',
+      innerWidth,
+      '…',
+    ))
+    // Rows that always stay: a blank before the options, the options, a blank
+    // before the footer, and the footer. The remaining capacity is spent top
+    // down on the decision's context, so a cramped panel trims the argument
+    // preview first and never drops the reason for asking.
+    const capacity = Math.max(0, maxHeight - optionLines.length - 3)
+    const head: string[] = []
+    if (capacity > 0) {
+      head.push(truncateToWidth(
+        `${this.palette.bold(this.palette.accent('Approval required'))}${this.palette.dim(` · ${displayText(this.toolName)}`)}`,
+        innerWidth,
+        '…',
+      ))
+    }
+    const reasonLines = this.reason === undefined || this.reason === ''
+      ? []
+      : wrapTextWithAnsi(displayText(this.reason), innerWidth)
+    if (head.length > 0 && reasonLines.length > 0) {
+      const room = capacity - head.length
+      const shown = reasonLines.slice(0, room)
+      head.push(...shown)
+      if (shown.length < reasonLines.length) {
+        const hidden = reasonLines.length - shown.length
+        // The overflow marker may itself not fit; the reason's head is what matters.
+        if (head.length < capacity) head.push(this.palette.dim(`… ${hidden} more lines`))
+      }
+    }
+    const detailRoom = capacity - head.length
+    const detailLines = this.detail === undefined || this.detail === ''
+      ? []
+      : wrapTextWithAnsi(displayText(this.detail), innerWidth)
+    if (detailLines.length > 0 && detailRoom >= 3) {
+      const bodyRoom = detailRoom - 2
+      // A preview is worth its heading only when it fits complete or can keep
+      // at least one body line beside its overflow marker.
+      if (detailLines.length <= bodyRoom || bodyRoom >= 2) {
+        head.push('', this.palette.dim('Arguments'))
+        const keep = detailLines.length <= bodyRoom ? detailLines.length : bodyRoom - 1
+        for (const line of detailLines.slice(0, keep)) head.push(this.palette.dim(line))
+        if (keep < detailLines.length) {
+          head.push(this.palette.dim(`… ${detailLines.length - keep} more lines`))
+        }
+      }
+    }
+
+    let rows = [...head, '', ...optionLines, '', footer]
+    if (rows.length > maxHeight) {
+      // Only a panel too short for its own decision surface reaches this: the
+      // options and their controls outrank the explanation above them.
+      rows = maxHeight === 1
+        ? [this.palette.dim(`↑ ${rows.length} lines hidden`)]
+        : [
+          this.palette.dim(`↑ ${rows.length - maxHeight + 1} lines hidden`),
+          ...rows.slice(-(maxHeight - 1)),
+        ]
+    }
+    return rows.map((line) => {
+      const bounded = truncateToWidth(line, innerWidth, '…')
+      const pad = ' '.repeat(Math.max(0, innerWidth - visibleWidth(bounded)))
+      const outerPad = ' '.repeat(horizontalPadding)
+      return `${outerPad}${bounded}${pad}${outerPad}`
+    })
+  }
+
+  /** Render one decision as a wrapped label with its dim description. */
+  private renderOption(option: ApprovalOption, index: number, innerWidth: number): string[] {
+    const cursor = index === this.selectedIndex ? '›' : ' '
+    const prefixPlain = ` ${cursor} ${index + 1}. `
+    const prefixWidth = visibleWidth(prefixPlain)
+    const bodyWidth = Math.max(1, innerWidth - prefixWidth)
+    const lines: string[] = []
+    for (const [lineIndex, labelLine] of wrapTextWithAnsi(displayText(option.label), bodyWidth).entries()) {
+      const composed = `${lineIndex === 0 ? prefixPlain : ' '.repeat(prefixWidth)}${labelLine}`
+      lines.push(index === this.selectedIndex ? this.palette.bold(this.palette.accent(composed)) : composed)
+    }
+    for (const descLine of wrapTextWithAnsi(displayText(option.description), bodyWidth)) {
+      lines.push(`${' '.repeat(prefixWidth)}${this.palette.dim(descLine)}`)
+    }
+    return lines
   }
 }
 

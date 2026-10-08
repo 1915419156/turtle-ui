@@ -37,10 +37,7 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib/index.js",
-    "lib/invariant.js",
-    "lib/prompt.js",
-    "lib/startup.js",
+    "lib/**/*.js",
     "lib/types/**/*.d.ts",
     "lib/types/**/*.d.ts.map",
     "src",
@@ -71,8 +68,10 @@
     "@deepseek-ai/dsh-token-meter": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-tool-todo": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-tools": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-user-approval": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-user-questions": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-util-values": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-workspace": "^0.2.0-rc.2",
     "@deepseek-ai/schemastery": "^3.18.0"
   },
   "peerDependenciesMeta": {
@@ -86,6 +85,12 @@
       "optional": true
     },
     "@deepseek-ai/dsh-tool-todo": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-user-approval": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-workspace": {
       "optional": true
     }
   },
