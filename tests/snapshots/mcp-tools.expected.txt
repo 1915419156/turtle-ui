@@ -1,0 +1,56 @@
+terminal 92x30 buffer=normal length=30 base=0 viewport=0
+lifecycle started=1 stopped=0 progress=inactive
+title "DSH snapshot"
+cursor hidden column=7 viewportRow=20 bufferRow=20
+buffer
+0| " DEEPSEEK HARNESS"
+  style 1-8 fg=bright-magenta bold
+  style 10-16 bold
+1| " Snapshot agent ready."
+  style 1-21 dim
+2| " main-session"
+  style 1-12 dim
+3| <blank>
+4| "Assistant                                                                                   "
+  style 0-8 fg=bright-magenta bold underline
+5| "Model wait 0.0s                                                                             "
+  style 0-14 dim
+6| <blank>
+7| "╭─ MCP servers ────╮"
+  style 0-2 dim
+  style 3-13 fg=bright-magenta bold
+  style 14-19 dim
+8| "│  files:  2 tools │"
+  style 0-0 dim
+  style 3-8 dim
+  style 19-19 dim
+9| "│  git:    1 tool  │"
+  style 0-0 dim
+  style 3-8 dim
+  style 19-19 dim
+10| "╰──────────────────╯"
+  style 0-19 dim
+11| "files                                                                                       "
+  style 0-4 dim
+12| "  read — Read a file from the MCP filesystem server                                         "
+  style 0-50 dim
+13| "  write — Write a file through the MCP filesystem server                                    "
+  style 0-55 dim
+14| "                                                                                            "
+15| "git                                                                                         "
+  style 0-2 dim
+16| "  status — Show the working tree status                                                     "
+  style 0-38 dim
+17| "                                                                                            "
+18| <blank>
+19| "/workspace/project (tui-staging)  deepseek-v4-flash  ↑0 ↓0  0% context"
+  style 0-17 fg=bright-magenta bold
+  style 18-31 dim
+  style 34-50 dim
+  style 53-57 dim
+  style 60-69 dim
+20| " dsh >                                                                                      "
+  style 1-3 fg=bright-magenta bold
+  style 5-6 dim
+  style 7-7 inverse
+21-29| <blank>

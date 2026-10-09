@@ -33,6 +33,10 @@
       "types": "./lib/types/invariant.d.ts",
       "default": "./lib/invariant.js"
     },
+    "./i18n": {
+      "types": "./lib/types/i18n/index.d.ts",
+      "default": "./lib/i18n.js"
+    },
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },

@@ -52,6 +52,45 @@ The same provider publishes the launcher-side host facts the terminal reads. Whe
 
 Session management spans the picker's three scopes. `/resume` opens on this workspace, Tab cycles to all workspaces and to `archived`, Ctrl+N starts a fresh session in place, and Ctrl+D in the first two scopes hides the selected session through the workspace registry's durable archive set. Removal is archival by design — the harness has no hard delete; an archived session's log stays intact, disappears from the ordinary scopes, and is restored with Ctrl+D from the `archived` scope (`/resume --archived` opens it directly). Without the registry row the archived scope and Ctrl+D simply do not exist, and the picker says so rather than pretending.
 
+## Interaction
+
+The prompt status line reads left to right as one sentence about the session: working directory and branch, model, reasoning effort, un-cached/cached input and output tokens with the KV-cache hit rate, the live output rate in tokens per second while a step streams, and the share of the context window in use. Every fragment is a registered prompt value (`${model}`, `${reasoning}`, `${throughput}`, `${context}`, …), so a deployment can rearrange or drop any of them through `theme.leftPrompt` / `theme.rightPrompt`, and plugins can register their own.
+
+- `@` completes workspace paths; `@` followed by a path in a submitted prompt is announced to the model as an explicit file reference.
+- Up/Down walk submitted prompts; **Ctrl+R** opens a fuzzy search over the prompts submitted in this process, and Enter inserts the selection back into the editor without sending it. The retained list is bounded by `historySize`.
+- **Ctrl+O** cycles tool-card visibility (collapsed → expanded → hidden); **Ctrl+T** toggles reasoning blocks; **Ctrl+L** repaints after terminal corruption.
+- `/locale [en|zh|auto]` shows or switches the interface language; the change applies to the whole session at once.
+- **Double Esc** on an idle agent opens the rewind/fork picker. Each row is a restore point — the end of a completed turn, or the current end of the log to branch without discarding anything. Choosing one forks the session: the child inherits exactly that prefix of the log (an open tail is closed with synthetic forked results), is persisted under its own id, and is opened by the launcher in the same workspace. The source session is never modified, so a fork is always safe to repeat. Without a launcher the gesture reports that the host cannot hand off.
+
+`/render rich|plain` switches the transcript between parsed Markdown and verbatim text. Both modes receive the same escaped content, so the switch changes presentation only; plain mode is the useful choice when a terminal's own scrollback search matters more than formatting. The switch applies to a step that is still streaming — its live text is carried across the rebuild rather than waiting for the step to settle.
+
+## Operations
+
+- `/doctor` prints a self-check card: runtime (Node, platform, cores, memory, disk), session facts, the model route and whether a price table covers it, every optional service the TUI reads — including the `sessionProjections` registry, the `loader`, and the launcher-provided resume host — reporting explicitly when one is not mounted, and the active presentation state. Rows that indicate a reduced composition are summarized as warnings.
+- `/cost` reports token totals per bucket, the cache hit rate, and step count, plus an estimated spend when `prices` configures one. A price entry requires `input` and `output`; `provider`/`model` default to matching any route and `cacheRead`/`cacheWrite` default to the input price, so `{ model: "*", input: 0.27, output: 1.1 }` is a valid catch-all. Prices are deployment configuration, not provider-reported figures; `/cost --json` emits the same numbers for tooling.
+- `/mcp` lists the MCP servers whose tools are registered, grouped by the `mcp__<server>__<tool>` names they contribute, with each tool's description.
+- `/export [--md|--jsonl] [path]` writes the session log to a file — a reading transcript or the durable event stream — defaulting to a timestamped name in the session workspace.
+- `/btw <question>` asks a one-shot model call outside the session log: neither the question nor the answer becomes model history, and the reply streams into its own transcript card, so a side question is available even mid-turn. Its `recordInput: false` registration keeps the question text out of the durable log as well.
+
+## Languages
+
+The terminal ships English and Chinese and renders in whichever the process environment asks for: `locale: auto` (the default) reads `LC_ALL`, then `LC_MESSAGES`, then `LANG`, and takes a `zh` primary subtag as Chinese, everything else as English. `locale: en|zh` pins one. `/locale` reports the active language and switches it — `en`, `zh`, or `auto` to hand the choice back to the environment — and the whole session repaints immediately, command descriptions and slash autocomplete included. Two strings deliberately stay outside the dictionaries because their owner is the deployment rather than the interface: `theme.inputPlaceholder`, when a deployment sets one, and the exit line a launcher supplies through `tuiGoodbyeMessage` — the launcher is the only side that knows how it was invoked, so it owns that wording in every language.
+
+`zh` owns the translation key set and `en` is checked complete against it at compile time, so the two cannot drift. An entry is a function where a language needs grammar a `{placeholder}` cannot express, which is how English pluralizes a count while Chinese does not. The shipped surface is exported for embedders:
+
+```ts
+import { createTranslator, resolveLocale, LOCALE_IDS } from '@deepseek-ai/dsh-tui/i18n'
+
+const { t } = createTranslator(resolveLocale('auto'))
+t('count.toolCall', { count: 2 })   // '2 tool calls' or '2 次工具调用'
+```
+
+## Themes
+
+`/theme dark|light` pins the palette when a terminal does not report its color scheme (or reports one you disagree with), `/palette` prints every color and attribute role the interface is allowed to emit, and `/details` jumps tool-card visibility and reasoning display to named states directly.
+
+The window opens on the product line and the session identity — no startup animation, no artwork to dismiss — so the first thing on screen is the transcript and the prompt.
+
 ## Checks
 
 ```sh
@@ -59,3 +98,4 @@ pnpm run typecheck
 pnpm test
 pnpm run build
 ```
+

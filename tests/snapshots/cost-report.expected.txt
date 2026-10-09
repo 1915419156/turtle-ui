@@ -1,0 +1,88 @@
+terminal 92x36 buffer=normal length=36 base=0 viewport=0
+lifecycle started=1 stopped=0 progress=inactive
+title "DSH snapshot"
+cursor hidden column=7 viewportRow=27 bufferRow=27
+buffer
+0| " DEEPSEEK HARNESS"
+  style 1-8 fg=bright-magenta bold
+  style 10-16 bold
+1| " Snapshot agent ready."
+  style 1-21 dim
+2| " main-session"
+  style 1-12 dim
+3| <blank>
+4| "Assistant                                                                                   "
+  style 0-8 fg=bright-magenta bold underline
+5| "Billed.                                                                                     "
+6| "Model wait 0.0s                                                                             "
+  style 0-14 dim
+7| <blank>
+8| "You                                                                                         "
+  style 0-2 fg=bright-magenta bold underline
+9| "bill this                                                                                   "
+10| <blank>
+11| "╭─ Cost ───────────────────────────────╮"
+  style 0-2 dim
+  style 3-6 fg=bright-magenta bold
+  style 7-39 dim
+12| "│  Input (uncached):  1,250            │"
+  style 0-0 dim
+  style 3-19 dim
+  style 39-39 dim
+13| "│  Cache read:        3,000            │"
+  style 0-0 dim
+  style 3-19 dim
+  style 39-39 dim
+14| "│  Cache write:       250              │"
+  style 0-0 dim
+  style 3-19 dim
+  style 39-39 dim
+15| "│  Output:            340              │"
+  style 0-0 dim
+  style 3-19 dim
+  style 39-39 dim
+16| "│  Steps billed:      1                │"
+  style 0-0 dim
+  style 3-19 dim
+  style 39-39 dim
+17| "│  Cache hit rate:    67%              │"
+  style 0-0 dim
+  style 3-19 dim
+  style 39-39 dim
+18| "│  In price:          1,250 × $0.550/M │"
+  style 0-0 dim
+  style 3-19 dim
+  style 39-39 dim
+19| "│  Out price:         340 × $2.19/M    │"
+  style 0-0 dim
+  style 3-19 dim
+  style 39-39 dim
+20| "│  Cached read:       3,000 × $0.070/M │"
+  style 0-0 dim
+  style 3-19 dim
+  style 39-39 dim
+21| "│  Cached write:      250 × $0.550/M   │"
+  style 0-0 dim
+  style 3-19 dim
+  style 39-39 dim
+22| "│  Total:             $0.0018          │"
+  style 0-0 dim
+  style 3-19 dim
+  style 22-28 bold
+  style 39-39 dim
+23| "╰──────────────────────────────────────╯"
+  style 0-39 dim
+24| "Prices are configuration, not provider-reported: $0.550/M in, $2.19/M out.                  "
+  style 0-73 dim
+25| <blank>
+26| "/workspace/project (tui-staging)  deepseek-v4-pro  ↑1.3k ↓340  cache 67%  0% context"
+  style 0-17 fg=bright-magenta bold
+  style 18-31 dim
+  style 34-48 dim
+  style 51-71 dim
+  style 74-83 dim
+27| " dsh >                                                                                      "
+  style 1-3 fg=bright-magenta bold
+  style 5-6 dim
+  style 7-7 inverse
+28-35| <blank>

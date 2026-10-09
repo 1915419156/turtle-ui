@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -14,6 +14,7 @@ import { createUserMessage,
   ReasoningEffortId,
   type LlmCallConfig,
   type LlmModelReasoningInfo,
+  type StreamChunk,
   MessageId,
   createMessage,
   freezeMessage,
@@ -26,7 +27,8 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { SessionRecord } from '@deepseek-ai/dsh-session-query'
 import SkillRegistry, { type SkillCatalogSnapshot, type SkillDefinition, type SkillProvider, type SkillSummary } from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-session-title'
-import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import ToolRegistry, { type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import SessionReferenceResolver, { formatSessionReferenceMention } from '@deepseek-ai/dsh-session-reference'
 import { RetryId } from '@deepseek-ai/dsh-llm-retry'
@@ -38,11 +40,13 @@ import {
   renderSkillInvocation,
   TuiPromptService,
   resolveTuiConfig,
+  Config,
   type TuiOverlayHost,
   type TuiOverlaySession,
   type TuiRuntime,
 } from '../src/index.ts'
 import { WorkspaceFileSearch } from '../src/chat/file-autocomplete.ts'
+import { createTranslator } from '../src/i18n/translate.ts'
 import { ResumePicker, type ResumeCandidate } from '../src/components/dialogs.ts'
 import { ATTRIBUTE_ROLES, brandText, COLOR_ROLES, createPalette, paletteSpec } from '../src/components/theme.ts'
 import {
@@ -51,6 +55,7 @@ import {
   createTuiTestHarness,
   disposeTuiTestHarness,
   emitAssistantChunks,
+  emitAssistantFrame,
   type TuiHarnessOptions,
 } from './harness.ts'
 import { HeadlessTerminal } from './headless-terminal.ts'
@@ -150,12 +155,13 @@ async function setup(options: TuiHarnessOptions = {}) {
   // Let the harness default cwd ('/workspace') stand: a checkout-dependent
   // process.cwd() longer than the 88-column fake terminal pushes the footer
   // token counters off-screen and fails their assertions by location.
+  //
   const result = await createTuiTestHarness(terminal, exit, options)
   await tick()
   return result
 }
 
-async function dispose(setupResult: Awaited<ReturnType<typeof setup>>): Promise<void> {
+async function dispose(setupResult: { controller: { dispose(): Promise<void> }, ctx: Context }): Promise<void> {
   await disposeTuiTestHarness(setupResult)
 }
 
@@ -201,8 +207,14 @@ function provideLlmCatalog(ctx: Context): void {
 
 describe('TUI config', () => {
   it('defaults every direct-call TUI option', () => {
-    expect(resolveTuiConfig(undefined)).toEqual({
+    // An empty environment stands in for a C/POSIX locale, so the detected
+    // language is English and the assertion does not depend on the machine.
+    expect(resolveTuiConfig(undefined, {})).toEqual({
       showReasoning: true,
+      renderMode: 'rich',
+      historySize: 200,
+      prices: [],
+      currency: '$',
       maxToolOutputLines: 6,
       maxDiffEditLength: 1000,
       maxQuestionOptions: 8,
@@ -218,10 +230,11 @@ describe('TUI config', () => {
       fileSearchMaxEntries: 10_000,
       fileSearchExcludedDirectories: ['.git', 'node_modules'],
       showHardwareCursor: false,
+      locale: 'en',
       theme: {
         color: true,
         truecolor: false,
-        leftPrompt: '${cwd}${git/worktree}${model}${token_meter/cache_hit_rate}${context}',
+        leftPrompt: '${cwd}${git/worktree}${model}${reasoning}${token_meter/cache_hit_rate}${throughput}${context}',
         rightPrompt: '${queued}',
         inputPrompt: '${symbol} ${indicator}',
         inputPlaceholder: 'press enter to steer and esc to cancel',
@@ -247,8 +260,12 @@ describe('TUI config', () => {
       showHardwareCursor: true,
       theme: { color: false, truecolor: true },
       title: 'DSH',
-    })).toEqual({
+    }, {})).toEqual({
       showReasoning: false,
+      renderMode: 'rich',
+      historySize: 200,
+      prices: [],
+      currency: '$',
       maxToolOutputLines: 2,
       maxDiffEditLength: 12,
       maxQuestionOptions: 3,
@@ -264,16 +281,59 @@ describe('TUI config', () => {
       fileSearchMaxEntries: 123,
       fileSearchExcludedDirectories: ['.git', 'generated'],
       showHardwareCursor: true,
+      locale: 'en',
       theme: {
         color: false,
         truecolor: true,
-        leftPrompt: '${cwd}${git/worktree}${model}${token_meter/cache_hit_rate}${context}',
+        leftPrompt: '${cwd}${git/worktree}${model}${reasoning}${token_meter/cache_hit_rate}${throughput}${context}',
         rightPrompt: '${queued}',
         inputPrompt: '${symbol} ${indicator}',
         inputPlaceholder: 'press enter to steer and esc to cancel',
       },
       title: 'DSH',
     })
+  })
+
+  it('resolves the interface language from config and the environment', () => {
+    // An explicit locale wins and carries its own default placeholder.
+    expect(resolveTuiConfig({ locale: 'zh' }, {})).toMatchObject({
+      locale: 'zh',
+      theme: { inputPlaceholder: '按回车追加指令，按 Esc 取消' },
+    })
+    // `auto` (and an absent value) follows the environment, most specific
+    // variable first, and a non-Chinese tag falls back to English.
+    expect(resolveTuiConfig(undefined, { LANG: 'zh_CN.UTF-8' }).locale).toBe('zh')
+    expect(resolveTuiConfig({ locale: 'auto' }, { LANG: 'en_US.UTF-8' }).locale).toBe('en')
+    expect(resolveTuiConfig(undefined, { LC_ALL: 'zh_CN.UTF-8', LANG: 'en_US.UTF-8' }).locale).toBe('zh')
+    expect(resolveTuiConfig(undefined, { LANG: 'fr_FR.UTF-8' }).locale).toBe('en')
+    // A deployment-provided placeholder is copy, so it wins in every language.
+    expect(resolveTuiConfig({ locale: 'zh', theme: { inputPlaceholder: 'custom' } }, {}).theme.inputPlaceholder)
+      .toBe('custom')
+  })
+
+  it('accepts only the shipped locales and auto in the config schema', () => {
+    // The schema is the Loader boundary, so an unknown language fails there
+    // rather than silently rendering English.
+    expect(Config({ locale: 'zh' }).locale).toBe('zh')
+    expect(Config({ locale: 'en' }).locale).toBe('en')
+    expect(Config({ locale: 'auto' }).locale).toBe('auto')
+    expect(Config({}).locale).toBe('auto')
+    expect(() => Config({ locale: 'ja' } as never)).toThrow()
+    expect(() => Config({ locale: 'zh-CN' } as never)).toThrow()
+  })
+
+  it('rejects a price row that omits a required price, and keeps the optional ones', () => {
+    // schemastery leaves object fields optional by default, so without an
+    // explicit requirement `{ model: "*" }` validated and then crashed `/cost`
+    // on `formatCost(undefined)`. These inputs are deliberately invalid, which
+    // is why they are cast rather than type-checked.
+    expect(() => Config({ prices: [{ model: '*' }] as never })).toThrow(/input/u)
+    expect(() => Config({ prices: [{ model: '*', input: 1 }] as never })).toThrow(/output/u)
+    // The route matchers and the two cache prices stay optional: they have
+    // documented fallbacks (any provider/model, and the input price).
+    expect(Config({ prices: [{ input: 1, output: 2 }] }).prices).toEqual([{ input: 1, output: 2 }])
+    expect(Config({ prices: [{ model: '*', input: 1, output: 2, cacheRead: 0.1 }] }).prices)
+      .toEqual([{ model: '*', input: 1, output: 2, cacheRead: 0.1 }])
   })
 })
 
@@ -799,6 +859,7 @@ describe('goodbye message and /resume', () => {
       createPalette(false),
       () => {},
       () => {},
+      createTranslator('en'),
     )
     picker.focused = true
     picker.handleInput('\r')
@@ -840,6 +901,7 @@ describe('goodbye message and /resume', () => {
         createPalette(false),
         () => {},
         () => {},
+        createTranslator('en'),
         options.setArchived === undefined
           ? undefined
           : (request) => {
@@ -887,6 +949,9 @@ describe('goodbye message and /resume', () => {
 
     it('never archives the live current session and reports registry failures', async () => {
       const current = candidate('current')
+      // The picker identifies the current session by the key behind the reason,
+      // not the rendered text, so its own refusal works in any language.
+      current.disabledKey = 'resume.disabled.current'
       current.disabledReason = 'current session'
       const refusing = buildPicker({
         candidates: [current],
@@ -2096,7 +2161,7 @@ describe('pi-tui chat lifecycle and transcript', () => {
     })
     await tick()
     expect(result.terminal.output).toContain('live thought')
-    result.terminal.send('\x12')
+    result.terminal.send('\x14')
     await tick()
     appendAssistant(
       result.session,
@@ -3181,12 +3246,19 @@ describe('pi-tui chat lifecycle and transcript', () => {
     })
 
     expect(result.terminal.output).not.toContain('stale partial response')
+    // Ctrl+R now opens history search. Replaying the log must not re-add the
+    // same prompts to the mirror, or the search list would grow a duplicate of
+    // every replayed prompt. Selecting the top row fills the editor with the
+    // newest prompt instead of sending it.
     result.terminal.send('\x12')
-    result.terminal.send('\x1b[A')
-    result.terminal.send('\x1b[A')
-    result.terminal.send('\x1b[A')
+    await tick()
+    expect(result.terminal.output).toContain('Search prompt history')
     result.terminal.send('\r')
-    expect(result.agent.sent).toEqual([[{ type: 'text', text: 'first prompt' }]])
+    await tick()
+    expect(result.agent.sent).toEqual([])
+    result.terminal.send('\r')
+    await tick()
+    expect(result.agent.sent).toEqual([[{ type: 'text', text: 'second prompt' }]])
     await dispose(result)
   })
 
@@ -3530,7 +3602,9 @@ describe('pi-tui chat lifecycle and transcript', () => {
     result.terminal.send('\x1b')
     result.terminal.send('\x04')
     result.terminal.send('\x03')
-    result.terminal.send('\x12')
+    // Ctrl+T toggles reasoning (Ctrl+R is history search since the search
+    // gesture landed); the sweep still covers one global transcript key.
+    result.terminal.send('\x14')
     result.terminal.send('\x0f')
     expect(result.agent.cancelled).toContainEqual({ kind: 'user' })
 
@@ -5341,7 +5415,7 @@ describe('tool cards and surface replay', () => {
     }
     await tick()
     expect(result.terminal.output).toContain('$ raw command')
-    result.terminal.send('\x12')
+    result.terminal.send('\x14')
     await tick()
     expect(result.terminal.output).toContain('call presenter boom')
     expect(result.terminal.output).toContain('Symbol(input)')
@@ -5852,10 +5926,10 @@ describe('tool cards and surface replay', () => {
     expect(liveRender).not.toContain('generic replacement copy')
     expect(liveRender).not.toContain('foreign plugin replacement copy')
 
-    // Ctrl+R toggles reasoning, which rebuilds the transcript from the log; the
+    // Ctrl+T toggles reasoning, which rebuilds the transcript from the log; the
     // replayed projection matches what the live appends produced, including the
     // shadowed assistant message's tool card.
-    result.terminal.send('\x12')
+    result.terminal.send('\x14')
     await tick()
     result.terminal.resize(90)
     await tick()
@@ -6890,6 +6964,7 @@ describe('TUI extension service', () => {
     const secondTerminal = new FakeTerminal()
     const secondController = createTuiChat(result.ctx, {
       sessionId: result.agent.id,
+      locale: 'en',
       theme: { color: false },
       welcome: 'Mounted again.',
     }, {
@@ -6960,6 +7035,93 @@ describe('application exit', () => {
   })
 })
 
+describe('interface language', () => {
+  it('renders a Chinese session when the locale is pinned', async () => {
+    const result = await setup({ config: { locale: 'zh' } })
+    await vi.waitFor(() => {
+      // The seeded turn's role header and timing footer both come from the
+      // Chinese dictionary, so the transcript renders Chinese end to end.
+      expect(result.terminal.output).toContain('助手')
+      expect(result.terminal.output).toContain('等待模型')
+    })
+    appendUser(result.session, '你好')
+    await tick()
+    expect(result.terminal.output).toContain('你')
+    await dispose(result)
+  })
+
+  it('switches language at runtime and repaints the session', async () => {
+    const result = await setup()
+    // The harness pins English, so the suite never depends on the machine.
+    expect(result.terminal.output).toContain('Assistant')
+    expect(result.terminal.output).toContain('Model wait')
+
+    result.terminal.send('/locale zh')
+    result.terminal.send('\r')
+    await vi.waitFor(() => {
+      expect(result.terminal.output).toContain('界面语言已切换为 中文（zh）')
+      // The transcript repaints in the new language, notice included.
+      expect(result.terminal.output).toContain('助手')
+      expect(result.terminal.output).toContain('等待模型')
+    })
+
+    result.terminal.send('/locale en')
+    result.terminal.send('\r')
+    await vi.waitFor(() => {
+      expect(result.terminal.output).toContain('Interface language switched to English (en)')
+    })
+    // An unrecognized language is rejected rather than silently ignored.
+    result.terminal.send('/locale ja')
+    result.terminal.send('\r')
+    await vi.waitFor(() => {
+      expect(result.terminal.output).toContain('Unknown /locale argument "ja"')
+    })
+    await dispose(result)
+  })
+
+  it('reports the active language and refuses a redundant switch', async () => {
+    const result = await setup({ config: { locale: 'zh' } })
+    result.terminal.send('/locale')
+    result.terminal.send('\r')
+    await vi.waitFor(() => {
+      expect(result.terminal.output).toContain('界面语言：中文（zh）')
+      expect(result.terminal.output).toContain('en (English), zh (中文)')
+    })
+    // Re-selecting the locale already in force is reported, not re-applied.
+    result.terminal.send('/locale zh')
+    result.terminal.send('\r')
+    await vi.waitFor(() => {
+      expect(result.terminal.output).toContain('界面语言已经是 中文（zh）')
+    })
+    await dispose(result)
+  })
+
+  it('switches the command listing with the language', async () => {
+    const result = await setup({ config: { locale: 'zh' } })
+    result.terminal.send('/help')
+    result.terminal.send('\r')
+    await vi.waitFor(() => {
+      expect(result.terminal.output).toContain('键盘快捷键')
+      // A command description is registry copy captured at registration, so it
+      // only reads Chinese because the switch re-registers the commands.
+      expect(result.terminal.output).toContain('/locale [en|zh|auto] — 查看或切换界面语言')
+      expect(result.terminal.output).toContain('/doctor — 自检运行时、会话与已挂载服务')
+    })
+    await dispose(result)
+  })
+
+  it('keeps a deployment-provided placeholder in every language', async () => {
+    const result = await setup({
+      status: 'running',
+      config: { locale: 'zh', theme: { inputPlaceholder: 'custom hint' } },
+    })
+    await vi.waitFor(() => {
+      expect(result.terminal.output).toContain('custom hint')
+    })
+    await dispose(result)
+  })
+})
+
 describe('terminal mounting', () => {
   it('starts immediately when the configured agent already exists', async () => {
     const ctx = new Context()
@@ -6973,7 +7135,7 @@ describe('terminal mounting', () => {
     const session = ctx.sessions.create(SessionId('main'))
     await ctx.agents.register(createBareAgent(ctx, session))
     const terminal = new FakeTerminal()
-    mountTui(ctx, { theme: { color: false } }, { terminal, exit: vi.fn() })
+    mountTui(ctx, { locale: 'en', theme: { color: false } }, { terminal, exit: vi.fn() })
     await tick()
     expect(terminal.started).toBe(1)
     await ctx.fiber.dispose()
@@ -6999,7 +7161,7 @@ describe('terminal mounting', () => {
     await ctx.plugin({
       inject: ['agents', 'commands', 'userQuestions', 'tools', 'llm', 'tokenMeter', 'tuiPrompt'],
       apply: (pluginCtx: Context) => {
-        mountTui(pluginCtx, { theme: { color: false } }, { terminal, exit: vi.fn() })
+        mountTui(pluginCtx, { locale: 'en', theme: { color: false } }, { terminal, exit: vi.fn() })
       },
     })
     await tick()
@@ -7021,7 +7183,7 @@ describe('terminal mounting', () => {
     await ctx.plugin(TuiPromptService)
     ctx.provide('tools', { get: () => undefined } as never)
     const terminal = new FakeTerminal()
-    mountTui(ctx, { sessionId: 'late-session', theme: { color: false } }, { terminal, exit: vi.fn() })
+    mountTui(ctx, { sessionId: 'late-session', locale: 'en', theme: { color: false } }, { terminal, exit: vi.fn() })
     expect(terminal.started).toBe(0)
 
     const otherSession = ctx.sessions.create(SessionId('other-session'))
@@ -7047,7 +7209,7 @@ describe('terminal mounting', () => {
     ctx.provide('tools', { get: () => undefined } as never)
     const terminal = new FakeTerminal()
     const exit = vi.fn()
-    mountTui(ctx, { sessionId: 'main-session', theme: { color: false } }, { terminal, exit })
+    mountTui(ctx, { sessionId: 'main-session', locale: 'en', theme: { color: false } }, { terminal, exit })
 
     ctx.emit('agent-loop/config-start-failed', { sessionId: SessionId('other-session'), error: new Error('other failed') })
     expect(terminal.output).toBe('')
@@ -7078,7 +7240,7 @@ describe('terminal mounting', () => {
     const terminal = new FakeTerminal()
     const exit = vi.fn()
 
-    mountTui(ctx, { sessionId: 'main-session', theme: { color: false } }, { terminal, exit })
+    mountTui(ctx, { sessionId: 'main-session', locale: 'en', theme: { color: false } }, { terminal, exit })
     ctx.emit('agent-loop/config-start-failed', {
       sessionId: SessionId('main-session'),
       error: { toString(): string { throw new Error('coercion failed') } },
@@ -7106,7 +7268,7 @@ describe('terminal mounting', () => {
     const terminal = new FakeTerminal()
     terminal.start = () => { throw new Error('terminal startup failed') }
 
-    expect(() => createTuiChat(ctx, { sessionId: 'failed-start-session', theme: { color: false } }, { terminal, exit: vi.fn() }))
+    expect(() => createTuiChat(ctx, { sessionId: 'failed-start-session', locale: 'en', theme: { color: false } }, { terminal, exit: vi.fn() }))
       .toThrow('terminal startup failed')
     await tick()
     expect(ctx.commands.list(ctx.agents.get(SessionId('failed-start-session'))!)).toEqual([])
@@ -7393,5 +7555,479 @@ describe('banner sweep reveal', () => {
     await tick()
     await tick()
     expect(result.terminal.output.length).toBe(settled)
+  })
+})
+
+describe('session workflow commands', () => {
+  it('switches render mode with /render, reporting the current mode for bare input', async () => {
+    const result = await setup()
+    await result.ctx.commands.execute(result.agent, '/render', [], new AbortController().signal)
+    await tick()
+    expect(result.terminal.output).toContain('Render mode: rich (Markdown)')
+
+    await result.ctx.commands.execute(result.agent, '/render plain', [], new AbortController().signal)
+    await tick()
+    expect(result.terminal.output).toContain('Render mode: plain (verbatim)')
+
+    // Idempotent: switching to the active mode reports rather than rebuilding.
+    const before = result.terminal.output.length
+    await result.ctx.commands.execute(result.agent, '/render plain', [], new AbortController().signal)
+    await tick()
+    expect(result.terminal.output.slice(before)).toContain('already plain (verbatim)')
+
+    await expect(result.ctx.commands.execute(result.agent, '/render weird', [], new AbortController().signal))
+      .resolves.toMatchObject({ result: { kind: 'error' } })
+    await dispose(result)
+  })
+
+  it('reports /doctor, /cost, and /mcp against the mounted composition', async () => {
+    const result = await setup()
+    for (const command of ['/doctor', '/mcp']) {
+      await result.ctx.commands.execute(result.agent, command, [], new AbortController().signal)
+      await tick()
+    }
+    await result.ctx.commands.execute(result.agent, '/cost', [], new AbortController().signal)
+    await tick()
+
+    expect(result.terminal.output).toContain('Doctor')
+    expect(result.terminal.output).toContain('Node')
+    expect(result.terminal.output).toContain('Render mode')
+    // No price table is configured by default, so cost reports tokens only.
+    expect(result.terminal.output).toContain('Cost')
+    expect(result.terminal.output).toContain('not configured')
+    // No MCP rows are mounted, so the inventory says so rather than printing an
+    // empty table.
+    expect(result.terminal.output).toContain('No MCP tools are registered')
+    await dispose(result)
+  })
+
+  it('estimates cost when a price table is configured and emits JSON on request', async () => {
+    const result = await setup({
+      config: { prices: [{ model: '*', input: 1, output: 4 }] },
+    })
+    appendAssistant(result.session, [{ type: 'text', text: 'billed' }], { inputTokens: 1_000_000, outputTokens: 250_000 })
+    await tick()
+    await result.ctx.commands.execute(result.agent, '/cost', [], new AbortController().signal)
+    await tick()
+    expect(result.terminal.output).toContain('Total')
+    expect(result.terminal.output).toContain('$2.00')
+
+    const before = result.terminal.output.length
+    await result.ctx.commands.execute(result.agent, '/cost --json', [], new AbortController().signal)
+    await tick()
+    const emitted = result.terminal.output.slice(before)
+    expect(emitted).toContain('estimatedCost')
+    await dispose(result)
+  })
+
+  it('writes a session export and reports the destination', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-tui-export-cmd-'))
+    try {
+      const result = await setup()
+      appendUser(result.session, 'exported through the command')
+      await tick()
+      await result.ctx.commands.execute(result.agent, `/export ${join(directory, 'out.md')}`, [], new AbortController().signal)
+      await tick()
+      expect(result.terminal.output).toContain('Exported')
+      const written = await readFile(join(directory, 'out.md'), 'utf8')
+      expect(written).toContain('exported through the command')
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('reports an export failure without tearing down the transcript', async () => {
+    const result = await setup()
+    // The command answers through its CommandResult (the channel's own
+    // dispatcher renders it), so assert the failure is reported, not thrown.
+    const execution = await result.ctx.commands.execute(
+      result.agent, '/export /dev/null/out.md', [], new AbortController().signal,
+    )
+    await tick()
+    expect(execution?.result).toMatchObject({ kind: 'error' })
+    expect(execution?.result.text).toContain('Export failed')
+    // The TUI is still live: it accepts another command afterwards.
+    await result.ctx.commands.execute(result.agent, '/render', [], new AbortController().signal)
+    await tick()
+    expect(result.terminal.output).toContain('Render mode: rich (Markdown)')
+    await dispose(result)
+  })
+
+  it('answers /btw asynchronously without adding anything to the session log', async () => {
+    const result = await setup()
+    const conversationBefore = result.session.snapshotEvents()
+      .filter(event => event.type === 'user/message' || event.type === 'assistant/message').length
+    await result.ctx.commands.execute(result.agent, '/btw what changed?', [], new AbortController().signal)
+    await tick()
+    expect(result.terminal.output).toContain('Aside')
+    // A side question is a one-shot LLM call: the harness's stub llm service
+    // has no adapter, so the failure is reported, and crucially nothing was
+    // appended to the conversation the model sees.
+    expect(result.terminal.output).toContain('Aside failed')
+    const conversationAfter = result.session.snapshotEvents()
+      .filter(event => event.type === 'user/message' || event.type === 'assistant/message').length
+    expect(conversationAfter).toBe(conversationBefore)
+    await dispose(result)
+  })
+
+  it('validates /btw and /export arguments', async () => {
+    const result = await setup()
+    await expect(result.ctx.commands.execute(result.agent, '/btw', [], new AbortController().signal))
+      .resolves.toMatchObject({ result: { kind: 'error' } })
+    await expect(result.ctx.commands.execute(result.agent, '/export --bogus out.md', [], new AbortController().signal))
+      .resolves.toMatchObject({ result: { kind: 'error' } })
+    await dispose(result)
+  })
+
+  it('opens the rewind picker on double Esc and refuses without a handoff host', async () => {
+    const result = await setup()
+    appendUser(result.session, 'first prompt')
+    result.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    await tick()
+    result.terminal.send('\x1b')
+    result.terminal.send('\x1b')
+    await tick()
+    // The default harness has no host handoff, so the gesture reports the
+    // missing capability rather than opening a picker that cannot commit.
+    expect(result.terminal.output).toContain('cannot fork a session in place')
+    await dispose(result)
+  })
+
+  it('reports rewind preconditions and opens the picker for an idle session with history', async () => {
+    const handoff = vi.fn(async () => { throw new Error('host returned') })
+    const result = await setup({ handoffResume: handoff })
+    appendUser(result.session, 'first prompt')
+    result.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    await tick()
+
+    await result.ctx.commands.execute(result.agent, '/rewind', [], new AbortController().signal)
+    await tick()
+    expect(result.terminal.output).toContain('Rewind or fork session')
+    expect(result.terminal.output).toContain('Turn 1')
+
+    // Esc closes without forking.
+    result.terminal.send('\x1b')
+    await tick()
+    expect(handoff).not.toHaveBeenCalled()
+    await dispose(result)
+  })
+
+  it('refuses to fork while a turn is running', async () => {
+    const result = await setup({ handoffResume: vi.fn(async () => { throw new Error('host returned') }) })
+    appendUser(result.session, 'work')
+    result.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    result.agent.status = 'running'
+    await tick()
+    await result.ctx.commands.execute(result.agent, '/rewind', [], new AbortController().signal)
+    await tick()
+    expect(result.terminal.output).toContain('Rewind requires the current turn to finish')
+    await dispose(result)
+  })
+
+  it('forks at the selected boundary with the inherited prefix, flushes it, then hands off', async () => {
+    const handoff = vi.fn(async (_sessionId: SessionId, _cwd: string): Promise<never> => {
+      throw new Error('host returned')
+    })
+    const result = await setup({
+      handoffResume: handoff,
+      agentOptions: { provider: 'p', model: 'm', reasoningEffort: 'low' as never },
+    })
+    // The harness seeds turn 1's open lifecycle; close it, then run a second
+    // turn, so rewinding to the first is distinguishable from branching at the
+    // log head.
+    appendUser(result.session, 'first prompt')
+    appendAssistant(result.session, [{ type: 'text', text: 'first answer' }])
+    result.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    result.session.append('turn/start', { turn: 2 })
+    appendUser(result.session, 'second prompt')
+    result.session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+    const events = result.session.snapshotEvents()
+    const firstTurnEnd = events.find(event => event.type === 'turn/end' && event.data.turn === 1)
+    /* v8 ignore next -- the fixture above always appends turn 1's end. */
+    if (firstTurnEnd === undefined) throw new Error('fixture is missing the first turn')
+    const boundary = firstTurnEnd.seq
+    await tick()
+
+    // Stand in for agent-loop's factory, recording what the controller requested
+    // and minting a real store-backed child so `sessions.flush` has a live entry.
+    const requests: Record<string, unknown>[] = []
+    const disposedHandles: string[] = []
+    result.ctx.agents.setFactory({
+      async createAgent(_ownerCtx: unknown, options: Record<string, unknown>) {
+        requests.push(options)
+        /* v8 ignore next -- the recorded request mirrors the option type by construction. */
+        const child = result.ctx.sessions.create(options.sessionId as never, {
+          meta: options.meta as never,
+          seed: options.seed as never,
+          inheritedEventCount: options.inheritedEventCount as never,
+        })
+        return {
+          agent: { id: child.id, session: child },
+          dispose: async () => { disposedHandles.push(String(child.id)) },
+        }
+      },
+      async resume() { throw new Error('resume is not part of this test') },
+    } as never)
+
+    // Flush must precede the handoff: the replacement process reads the child's
+    // log from storage, not from this process's memory.
+    const order: string[] = []
+    const flush = result.ctx.sessions.flush.bind(result.ctx.sessions)
+    result.ctx.sessions.flush = async (session) => {
+      order.push(`flush:${String(session.id)}`)
+      return await flush(session)
+    }
+    handoff.mockImplementation(async (sessionId: SessionId) => {
+      order.push(`handoff:${String(sessionId)}`)
+      throw new Error('host returned')
+    })
+
+    await result.ctx.commands.execute(result.agent, '/rewind', [], new AbortController().signal)
+    await tick()
+    // Rows are newest first (head, turn 2, turn 1), so two Downs reach turn 1.
+    expect(result.terminal.output).toContain('Turn 1')
+    result.terminal.send('\x1b[B')
+    result.terminal.send('\x1b[B')
+    result.terminal.send('\r')
+    await tick()
+    await tick()
+
+    const request = requests[0]
+    expect(request).toBeDefined()
+    const sessionId = String(request?.sessionId)
+    expect(sessionId.startsWith('session-')).toBe(true)
+    expect(sessionId).not.toBe(String(result.session.id))
+    expect(request?.meta).toEqual({
+      cwd: '/workspace',
+      parentSession: result.session.header.id,
+      isSeeded: true,
+    })
+    // The route travels with the child, so the fork does not fall back to the
+    // deployment's default model.
+    expect(request?.agentOptions).toEqual({ provider: 'p', model: 'm', reasoningEffort: 'low' })
+    // Exactly the prefix through turn 1, marked as inherited — turn 2 is cut.
+    // `buildForkSeed` appends the `session/end-seed` boundary marker; nothing
+    // else follows, because the cut lands on a `turn/end` that already closed
+    // the turn (the open-tail case is covered separately).
+    expect(request?.inheritedEventCount).toBe(boundary + 1)
+    const seed = request?.seed as readonly SessionEvent[]
+    expect(seed.slice(0, boundary + 1).map(event => event.type)).toEqual(
+      events.slice(0, boundary + 1).map(event => event.type),
+    )
+    expect(seed.slice(boundary + 1).map(event => event.type)).toEqual(['session/end-seed'])
+
+    expect(handoff).toHaveBeenCalledTimes(1)
+    expect(order).toEqual([`flush:${sessionId}`, `handoff:${sessionId}`])
+    // The host refused to commit, so the child must be retired rather than left
+    // as a live agent in this process.
+    expect(disposedHandles).toEqual([sessionId])
+    expect(result.terminal.output).toContain('Fork failed: host returned')
+    await dispose(result)
+  })
+
+  it('forks at the open log head with synthetic closers for the unfinished turn', async () => {
+    const result = await setup({ handoffResume: vi.fn(async () => { throw new Error('host returned') }) })
+    // The harness seeds turn 1's `turn/start` + `step/start`; a prompt arrives
+    // but the turn never ends, which is the state a mid-turn branch starts from.
+    appendUser(result.session, 'unfinished work')
+    await tick()
+    // Snapshot before the command runs: dispatching `/rewind` itself appends
+    // `command/run`/`command/done`, which the fork must not inherit.
+    const events = result.session.snapshotEvents()
+    const requests: { seed?: readonly SessionEvent[]; inheritedEventCount?: number }[] = []
+    result.ctx.agents.setFactory({
+      async createAgent(_owner: unknown, options: { seed?: readonly SessionEvent[]; inheritedEventCount?: number }) {
+        requests.push(options)
+        throw new Error('stop after recording')
+      },
+      async resume() { throw new Error('resume is not part of this test') },
+    } as never)
+    await result.ctx.commands.execute(result.agent, '/rewind', [], new AbortController().signal)
+    await tick()
+    // The only row is the head, so it is already selected.
+    result.terminal.send('\r')
+    await tick()
+    await tick()
+    const request = requests[0]
+    expect(request).toBeDefined()
+    // The head row inherits the whole log, which by now also carries the
+    // `command/run` that opened the picker — the durable log is the boundary,
+    // and the fork must not lose events to make a tidier picture.
+    const boundary = (request?.inheritedEventCount ?? 0) - 1
+    const seed = request?.seed ?? []
+    expect(boundary).toBe(events.length)
+    expect(seed[boundary]?.type).toBe('command/run')
+    expect(seed.slice(0, events.length).map(event => event.type)).toEqual(events.map(event => event.type))
+    // Then the boundary marker, then synthetic closers for the still-open step
+    // and turn, so the child starts from a well-formed log.
+    expect(seed[boundary + 1]?.type).toBe('session/end-seed')
+    expect(seed.slice(boundary + 2).map(event => event.type)).toEqual(['step/end', 'turn/end'])
+    await dispose(result)
+  })
+
+  it('reports a create failure without disturbing the running session', async () => {
+    const result = await setup({ handoffResume: vi.fn(async () => { throw new Error('unreachable') }) })
+    appendUser(result.session, 'prompt')
+    result.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    await tick()
+    result.ctx.agents.setFactory({
+      async createAgent() { throw new Error('factory refused') },
+      async resume() { throw new Error('resume is not part of this test') },
+    } as never)
+    await result.ctx.commands.execute(result.agent, '/rewind', [], new AbortController().signal)
+    await tick()
+    result.terminal.send('\r')
+    await tick()
+    await tick()
+    expect(result.terminal.output).toContain('Fork failed: factory refused')
+    // The source session is untouched and the terminal still accepts input.
+    expect(result.session.snapshotEvents().some(event => event.type === 'turn/end')).toBe(true)
+    await result.ctx.commands.execute(result.agent, '/render', [], new AbortController().signal)
+    await tick()
+    expect(result.terminal.output).toContain('Render mode: rich (Markdown)')
+    await dispose(result)
+  })
+
+  it('reports the git branch, throughput, and reasoning effort in the prompt context', async () => {
+    const result = await setup({ agentOptions: { provider: 'p', model: 'm', reasoningEffort: 'high' as never } })
+    await tick()
+    expect(result.terminal.output).toContain('tui-staging')
+    expect(result.terminal.output).toContain('effort high')
+    await dispose(result)
+  })
+})
+
+describe('streaming presentation changes', () => {
+  /**
+   * Screen-state sibling of `setup`: a raw concatenated output stream cannot
+   * prove that a live step is still on screen, because the pre-change frame
+   * stays in the scrollback forever.
+   */
+  async function setupScreen(options: TuiHarnessOptions = {}) {
+    const terminal = new HeadlessTerminal(100, 40)
+    const result = await createTuiTestHarness(terminal, vi.fn(), options)
+    await tick()
+    return result
+  }
+
+  const streamDelta = (text: string): StreamChunk => ({ type: 'text-delta', index: 0, text })
+  it('keeps an in-flight streamed step visible across a render-mode switch', async () => {
+    const result = await setupScreen()
+    emitAssistantChunks(result.ctx, result.agent, {
+      turn: 1,
+      step: 1,
+      records: [{ time: 1_000, chunk: streamDelta('PARTIAL_ANSWER') }],
+    })
+    await tick()
+    expect(await result.terminal.snapshot()).toContain('PARTIAL_ANSWER')
+
+    // The rebuild replays the log, which has no event for the un-settled step;
+    // the live component has to be carried across it.
+    await result.ctx.commands.execute(result.agent, '/render plain', [], new AbortController().signal)
+    await tick()
+    const afterSwitch = await result.terminal.snapshot()
+    expect(afterSwitch).toContain('Render mode: plain (verbatim)')
+    expect(afterSwitch).toContain('PARTIAL_ANSWER')
+
+    // The carried component is still the live one: the next chunk lands in it.
+    emitAssistantFrame(result.ctx, result.agent, {
+      type: 'chunk',
+      attemptId: LlmAttemptId('attempt-1'),
+      revision: 0,
+      index: 1,
+      time: 2_000,
+      chunk: streamDelta('STILL_STREAMING'),
+    })
+    await tick()
+    const continued = await result.terminal.snapshot()
+    expect(continued).toContain('PARTIAL_ANSWERSTILL_STREAMING')
+    await dispose(result)
+  })
+
+  it('streams a side question into its own card, and a second question does not clobber the first', async () => {
+    const first = Promise.withResolvers<void>()
+    const terminal = new HeadlessTerminal(100, 40)
+    const result = await createTuiTestHarness(terminal, vi.fn(), {
+      configureContext: async (ctx) => {
+        await ctx.plugin(SystemPrompt)
+        await ctx.plugin(ToolRegistry)
+        ctx.provide('llm', {
+          listProviders: () => [],
+          listModels: () => Promise.resolve([]),
+          resolveModelInfo: (provider: string, model: string) =>
+            Promise.resolve({ provider, id: model, name: model }),
+          async *stream(request: { messages: readonly unknown[] }) {
+            // The question is the last message of the derived surface.
+            const last = request.messages.at(-1) as { content: readonly { text?: string }[] } | undefined
+            const asked = last?.content.map(block => block.text ?? '').join('') ?? ''
+            yield streamDelta(`answer to ${asked}`)
+            if (asked.includes('first')) await first.promise
+          },
+        } as never)
+      },
+    })
+    await tick()
+    await result.ctx.commands.execute(result.agent, '/btw first question', [], new AbortController().signal)
+    await tick()
+    // The answer streams into its card while the request is still open.
+    const midStream = await terminal.snapshot()
+    expect(midStream).toContain('Aside · first question')
+    expect(midStream).toContain('answer to first question')
+
+    await result.ctx.commands.execute(result.agent, '/btw second question', [], new AbortController().signal)
+    await tick()
+    first.resolve()
+    await tick()
+    await tick()
+    const settled = await terminal.snapshot()
+    // Both cards stay in the transcript: the second question must not replace
+    // the first answer, and the settled text is not duplicated.
+    expect(settled).toContain('Aside · first question')
+    expect(settled).toContain('Aside · second question')
+    expect(settled).toContain('answer to second question')
+    expect(settled.split('answer to first question').length - 1).toBe(1)
+    await disposeTuiTestHarness(result)
+  })
+
+  it('aborts a pending side question when the terminal shuts down', async () => {
+    const pending = Promise.withResolvers<void>()
+    let sawAbort = false
+    const result = await setupScreen({
+      configureContext: async (ctx) => {
+        await ctx.plugin(SystemPrompt)
+        await ctx.plugin(ToolRegistry)
+        ctx.provide('llm', {
+          listProviders: () => [],
+          listModels: () => Promise.resolve([]),
+          resolveModelInfo: (provider: string, model: string) =>
+            Promise.resolve({ provider, id: model, name: model }),
+          async *stream(request: { signal?: AbortSignal }) {
+            request.signal?.addEventListener('abort', () => { sawAbort = true })
+            yield streamDelta('partial')
+            await pending.promise
+          },
+        } as never)
+      },
+    })
+    await result.ctx.commands.execute(result.agent, '/btw still running', [], new AbortController().signal)
+    await tick()
+    // A detached one-shot request has no other owner; shutdown must retire it.
+    await disposeTuiTestHarness(result)
+    expect(sawAbort).toBe(true)
+    pending.resolve()
+  })
+
+  it('reports the launcher-only capabilities among the doctor service rows', async () => {
+    // The harness mounts no launcher, so these rows must say so — the same
+    // explicit degradation every other optional service reports.
+    const result = await setup()
+    await result.ctx.commands.execute(result.agent, '/doctor', [], new AbortController().signal)
+    await tick()
+    const output = result.terminal.output
+    for (const row of ['Projections', 'Loader', 'Resume host']) {
+      expect(output).toContain(row)
+    }
+    expect(output).toContain('Resume host is not mounted')
+    await dispose(result)
   })
 })

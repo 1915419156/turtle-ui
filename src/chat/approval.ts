@@ -92,6 +92,7 @@ export function createApprovalQueue(deps: ApprovalQueueDeps): ApprovalQueue {
             settle(pending, 'rejected')
             startNext()
           },
+          deps.translator,
         ),
         // The approval panel occupies the same inline slot above the editor as
         // a question panel, so it shares that panel's size constraints.

@@ -81,6 +81,30 @@
         sessionId: !!js ctx.tuiStartup.sessionId ?? ctx.tuiStartup.resumeSessionId
         showReasoning: true
         maxToolOutputLines: 6
+        # `rich` parses transcript prose as Markdown; `plain` keeps it verbatim.
+        # Switchable at runtime with /render.
+        renderMode: rich
+        # Interface language. `auto` follows LC_ALL/LC_MESSAGES/LANG; `en` and
+        # `zh` pin one. Switchable at runtime with /locale.
+        locale: auto
+        # Retained prompts offered by the Ctrl+R search, newest first.
+        historySize: 200
+        # Optional price table for `/cost`. `input` and `output` are required;
+        # any other field left out (or set to `*`) matches any route, so a row
+        # may also act as a catch-all fallback. Prices are per million tokens in
+        # the currency below; they are deployment configuration, not figures
+        # reported by a provider.
+        currency: '$'
+        prices: []
+        # prices:
+        #   - provider: deepseek-official
+        #     model: deepseek-v4-pro
+        #     input: 0.55
+        #     output: 2.19
+        #     cacheRead: 0.07
+        #   - model: '*'
+        #     input: 0.27
+        #     output: 1.10
 
     - id: tool-ask-user
       name: '@deepseek-ai/dsh-tool-ask-user'

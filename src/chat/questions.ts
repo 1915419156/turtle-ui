@@ -108,6 +108,7 @@ export function createQuestionQueue(deps: QuestionQueueDeps): QuestionQueue {
             rejectQuestion(pending)
             startNextQuestion()
           },
+          deps.translator,
           mdTheme,
         ),
         options: {

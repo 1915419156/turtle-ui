@@ -32,12 +32,12 @@ viewport
   style 0-2 fg=bright-magenta bold underline
 15| "Show the live update.                                                                           "
 16| <blank>
-17| "/workspace/project (tui-staging)  deepseek-v4-flash  ↑0 ↓0  0% context"
+17| "/workspace/project (tui-staging)  deepseek-v4-flash  ↑0 ↓0  4.4 tok/s  0% context"
   style 0-17 fg=bright-magenta bold
   style 18-31 dim
   style 34-50 dim
-  style 53-57 dim
-  style 60-69 dim
+  style 53-68 dim
+  style 71-80 dim
 18| " dsh ● press enter to steer and esc to cancel                                                   "
   style 1-3 fg=bright-magenta bold
   style 5-44 dim

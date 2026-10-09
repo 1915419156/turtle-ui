@@ -18,6 +18,7 @@ import {
 import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import { isAppendSurfaceEvent, isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import type { Translator } from '../i18n/translate.ts'
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
 
 /** Editor that shows a placeholder without making it editable content. */
@@ -48,10 +49,11 @@ export class HintEditor extends Editor {
  * Format the session working directory as a prompt label: `~` for home,
  * `~/rel` for a home-relative path, the raw path otherwise.
  * @param cwd - operational working directory from the session header.
+ * @param t - Translator for the unset-workspace label.
  * @returns unescaped prompt label.
  */
-export function formatCwd(cwd: string | undefined): string {
-  if (cwd === undefined) return 'cwd unset'
+export function formatCwd(cwd: string | undefined, t: Translator['t']): string {
+  if (cwd === undefined) return t('prompt.cwdUnset')
   const home = homedir()
   const rel = relative(resolve(home), resolve(cwd))
   if (rel === '') return '~'

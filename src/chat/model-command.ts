@@ -52,6 +52,7 @@ type ContextResolution =
  */
 export function createModelController(deps: ModelControllerDeps): ModelController {
   const { ctx, resolved, palette, overlayManager, target } = deps
+  const t = deps.translator.t
   let contextWindow: number | undefined
   let contextResolution: Promise<ContextResolution> | undefined
   let modelOverlay: TuiOverlaySession | undefined
@@ -80,7 +81,7 @@ export function createModelController(deps: ModelControllerDeps): ModelControlle
           awaitingAdapter = true
           return
         }
-        deps.appendNotice(`Could not resolve model context: ${errorChain(result.error)}`, 'error')
+        deps.appendNotice(t('model.contextFailed', { error: errorChain(result.error) }), 'error')
         return
       }
       contextWindow = result.contextWindow
@@ -108,7 +109,12 @@ export function createModelController(deps: ModelControllerDeps): ModelControlle
       : explicitReasoning.effort
     if (sameRoute && target.current?.reasoningEffort === reasoningEffort) {
       const reasoning = targetReasoningLabel(selected, reasoningEffort)
-      deps.appendNotice(`Model is already ${targetLabel(selected)}${reasoning === undefined ? '' : ` with reasoning effort ${displayText(reasoning)}`}.`)
+      deps.appendNotice(t('model.already', {
+        label: targetLabel(selected),
+        reasoning: reasoning === undefined
+          ? ''
+          : t('model.alreadyReasoning', { effort: displayText(reasoning) }),
+      }))
       return
     }
     target.current = {
@@ -119,16 +125,16 @@ export function createModelController(deps: ModelControllerDeps): ModelControlle
     resolveContextWindow(target.current)
     const reasoning = targetReasoningLabel(selected, reasoningEffort)
     deps.appendNotice([
-      `Model selected: ${targetLabel(selected)}.`,
-      ...reasoning === undefined ? [] : [`Reasoning effort: ${displayText(reasoning)}.`],
-      'New steps will use it.',
+      t('model.selected', { label: targetLabel(selected) }),
+      ...reasoning === undefined ? [] : [t('model.reasoningSet', { effort: displayText(reasoning) })],
+      t('model.newSteps'),
     ].join(' '))
   }
 
   const showModelSelector = (choices: readonly ModelChoice[]): void => {
-    const current = target.current === undefined ? 'unset' : targetLabel(target.current)
+    const current = target.current === undefined ? t('common.unset') : targetLabel(target.current)
     if (choices.length === 0) {
-      deps.appendNotice(`Current model: ${current}\nNo models are advertised by registered providers.`, 'warning')
+      deps.appendNotice(t('model.currentNone', { model: current }), 'warning')
       return
     }
     void modelOverlay?.close()
@@ -143,6 +149,7 @@ export function createModelController(deps: ModelControllerDeps): ModelControlle
           selectModel(selection.choice, { effort: selection.reasoningEffort })
         },
         () => { void session.close() },
+        deps.translator,
       ),
       options: {
         width: resolved.modelDialogWidth,
@@ -168,7 +175,7 @@ export function createModelController(deps: ModelControllerDeps): ModelControlle
     }
     const parts = argument.split(/\s+/u)
     if (parts.length > 2) {
-      deps.appendNotice('Usage: /model [provider/]model', 'warning')
+      deps.appendNotice(t('model.usage'), 'warning')
       return
     }
 
@@ -181,11 +188,11 @@ export function createModelController(deps: ModelControllerDeps): ModelControlle
       matches = qualified.length > 0 ? qualified : choices.filter(choice => choice.model === value)
     }
     if (matches.length === 0) {
-      deps.appendNotice(`Unknown model: ${argument}. Run /model to list available models.`, 'warning')
+      deps.appendNotice(t('model.unknown', { argument }), 'warning')
       return
     }
     if (matches.length > 1) {
-      deps.appendNotice(`Model "${argument}" is advertised by multiple providers; use /model <provider>/<model>.`, 'warning')
+      deps.appendNotice(t('model.ambiguous', { argument }), 'warning')
       return
     }
     const selected = matches[0]
@@ -200,7 +207,7 @@ export function createModelController(deps: ModelControllerDeps): ModelControlle
       modelCommands = modelCommands.then(async () => {
         await handleModelCommand(raw)
       }).catch((error: unknown) => {
-        if (!deps.isDisposed()) deps.appendNotice(`Could not read the model catalog: ${errorChain(error)}`, 'error')
+        if (!deps.isDisposed()) deps.appendNotice(t('model.catalogFailed', { error: errorChain(error) }), 'error')
       })
     },
     resetContextResolution(): void {

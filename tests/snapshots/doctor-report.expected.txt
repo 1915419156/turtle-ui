@@ -1,0 +1,186 @@
+terminal 92x40 buffer=normal length=54 base=14 viewport=14
+lifecycle started=1 stopped=0 progress=inactive
+title "DSH snapshot"
+cursor hidden column=7 viewportRow=39 bufferRow=53
+buffer
+0| " DEEPSEEK HARNESS"
+  style 1-8 fg=bright-magenta bold
+  style 10-16 bold
+1| " Snapshot agent ready."
+  style 1-21 dim
+2| " main-session"
+  style 1-12 dim
+3| <blank>
+4| "You                                                                                         "
+  style 0-2 fg=bright-magenta bold underline
+5| "self-check                                                                                  "
+6| <blank>
+7| "╭─ Doctor ─────────────────────────────────────────────────────╮"
+  style 0-2 dim
+  style 3-8 fg=bright-magenta bold
+  style 9-63 dim
+8| "│  Node:                <version>                               │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+9| "│  Platform:            <platform>                             │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+10| "│  CPU:                 <n> cores                               │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+11| "│  Memory:              <used> / <total> used                  │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+12| "│  Terminal:            pid <pid>                              │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+13| "│  Session:             main-session                           │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+14| "│  Workspace:           /workspace/project                     │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+15| "│  Agent:               idle                                   │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+16| "│  Events:              6                                      │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+17| "│  Last event:          command/run @ 2026-07-22T09:10:11.000Z │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+18| "│  Provider:            deepseek-official                      │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+19| "│  Model:               deepseek-v4-pro                        │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+20| "│  Reasoning:           default                                │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+21| "│  Pricing:             configured                             │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+22| "│  Commands:            mounted                                │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+23| "│  Skills:              not mounted                            │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+24| "│  Session query:       mounted                                │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+25| "│  Persistence:         not mounted                            │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+26| "│  Workspace registry:  not mounted                            │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+27| "│  Session reference:   not mounted                            │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+28| "│  Projections:         not mounted                            │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+29| "│  Projection cache:    not mounted                            │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+30| "│  Loader:              not mounted                            │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+31| "│  Resume host:         not mounted                            │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+32| "│  Render mode:         rich (Markdown)                        │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+33| "│  Tool cards:          collapsed                              │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+34| "│  Reasoning blocks:    shown                                  │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+35| "│  Tool schemas:        0                                      │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+36| "│  TPS:                 n/a                                    │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+37| "│  Input:               1,250                                  │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+38| "│  Output:              340                                    │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+39| "│  Cache read:          3,000                                  │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+40| "│  Cache write:         0                                      │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+41| "│  Cache hit rate:      71%                                    │"
+  style 0-0 dim
+  style 3-21 dim
+  style 63-63 dim
+42| "╰──────────────────────────────────────────────────────────────╯"
+  style 0-63 dim
+43| "! Skills is not mounted; its surfaces are reduced.                                          "
+  style 0-49 dim
+44| "! Persistence is not mounted; its surfaces are reduced.                                     "
+  style 0-54 dim
+45| "! Workspace registry is not mounted; its surfaces are reduced.                              "
+  style 0-61 dim
+46| "! Session reference is not mounted; its surfaces are reduced.                               "
+  style 0-60 dim
+47| "! Projections is not mounted; its surfaces are reduced.                                     "
+  style 0-54 dim
+48| "! Projection cache is not mounted; its surfaces are reduced.                                "
+  style 0-59 dim
+49| "! Loader is not mounted; its surfaces are reduced.                                          "
+  style 0-49 dim
+50| "! Resume host is not mounted; its surfaces are reduced.                                     "
+  style 0-54 dim
+51| <blank>
+52| "/workspace/project (tui-staging)  deepseek-v4-pro  ↑1.3k ↓340  cache 71%  33% context"
+  style 0-17 fg=bright-magenta bold
+  style 18-31 dim
+  style 34-48 dim
+  style 51-71 dim
+  style 74-84 dim
+53| " dsh >                                                                                      "
+  style 1-3 fg=bright-magenta bold
+  style 5-6 dim
+  style 7-7 inverse

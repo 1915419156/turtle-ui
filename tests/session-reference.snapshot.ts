@@ -112,6 +112,7 @@ describe('TUI session-reference snapshot', () => {
     const controller = createTuiChat(ctx, {
       sessionId: target.id,
       welcome: 'Session reference snapshot.',
+      locale: 'en',
       theme: { color: true },
       title: 'DSH session reference',
     }, { terminal, exit: () => {} })

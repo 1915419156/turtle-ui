@@ -35,6 +35,7 @@ import {
   renderTuiPromptTemplate,
   type TuiPromptTemplateToken,
 } from '../prompt.ts'
+import type { Translator, TranslationKey } from '../i18n/translate.ts'
 
 /** A selectable model advertised by a provider, with its display name, description, and reasoning metadata. */
 export interface ModelChoice extends ModelSelection {
@@ -94,7 +95,14 @@ export function initialTarget(agent: Agent): ModelSelection | undefined {
     return { provider: logged.provider, model: logged.model, reasoningEffort: logged.reasoningEffort }
   }
   if (agent.options.provider === undefined || agent.options.model === undefined) return undefined
-  return { provider: agent.options.provider, model: agent.options.model }
+  // The configured per-agent effort seeds the target too, so the prompt's
+  // effort badge reports the route's real setting before the first request is
+  // logged (a logged header, once present, still wins as the durable truth).
+  return {
+    provider: agent.options.provider,
+    model: agent.options.model,
+    ...agent.options.reasoningEffort === undefined ? {} : { reasoningEffort: agent.options.reasoningEffort },
+  }
 }
 
 /**
@@ -180,30 +188,43 @@ export class StatusCardComponent implements Component {
   constructor(
     private readonly groups: readonly (readonly StatusCardRow[])[],
     private readonly palette: Palette,
+    /** Title shown in the card's top border. */
+    private readonly title: string,
   ) {}
 
   invalidate(): void {}
 
   render(width: number): string[] {
+    // Every measurement here is in terminal columns, not string length: a label
+    // may be translated (and a CJK glyph occupies two columns), so measuring
+    // code units would under-reserve the label column and truncate a Chinese
+    // label to half the columns it needs.
     const labels = this.groups.flatMap(group => group.map(([label]) => `${label}:`))
-    const naturalLabelWidth = Math.max(...labels.map(label => label.length))
-    const naturalBodyWidth = Math.max(...this.groups.flatMap(group => group.map(([, value]) =>
-      1 + naturalLabelWidth + 2 + visibleWidth(value))))
+    const naturalLabelWidth = Math.max(...labels.map(label => visibleWidth(label)))
+    // The card sizes itself so one label and one value share a row; a label then
+    // only yields when the terminal forced the card narrower than its content
+    // wants. Capping unconditionally would truncate a label (`Cache hit ra…`)
+    // even in a card wide enough to show it.
+    const desiredWidth = Math.max(...this.groups.flatMap(group => group.map(([, value]) =>
+      naturalLabelWidth + 3 + visibleWidth(value)))) + 4
     const cardWidth = Math.min(
       Math.max(8, width),
-      Math.max('Session status'.length + 5, naturalBodyWidth + 4),
+      Math.max(visibleWidth(this.title) + 5, desiredWidth),
     )
     const innerWidth = Math.max(1, cardWidth - 4)
-    const labelWidth = Math.min(
-      naturalLabelWidth,
-      Math.max(1, Math.floor(innerWidth / 3)),
-    )
+    const clamped = cardWidth < desiredWidth
+    const labelWidth = clamped
+      ? Math.min(naturalLabelWidth, Math.max(1, Math.floor(innerWidth / 3)))
+      : naturalLabelWidth
     const body: string[] = []
     for (const [groupIndex, group] of this.groups.entries()) {
       if (groupIndex > 0) body.push('')
       for (const [label, value] of group) {
         const plainLabel = truncateToWidth(`${label}:`, labelWidth, '')
-        const prefix = ` ${this.palette.dim(plainLabel.padEnd(labelWidth))}  `
+        // Pad to the column, not to the code-unit count, so a translated label
+        // lands in the same column as an ASCII one.
+        const padded = `${plainLabel}${' '.repeat(Math.max(0, labelWidth - visibleWidth(plainLabel)))}`
+        const prefix = ` ${this.palette.dim(padded)}  `
         const continuation = ' '.repeat(1 + labelWidth + 2)
         const valueWidth = Math.max(1, innerWidth - visibleWidth(prefix))
         const wrapped = wrapTextWithAnsi(value, valueWidth)
@@ -213,7 +234,7 @@ export class StatusCardComponent implements Component {
       }
     }
 
-    const title = truncateToWidth('Session status', Math.max(1, cardWidth - 5), '')
+    const title = truncateToWidth(this.title, Math.max(1, cardWidth - 5), '')
     const topTail = '─'.repeat(Math.max(0, cardWidth - visibleWidth(title) - 5))
     const top = `${this.palette.dim('╭─ ')}${this.palette.bold(this.palette.accent(title))}${this.palette.dim(` ${topTail}╮`)}`
     const lines = [top]
@@ -295,6 +316,7 @@ export class ModelDialog implements Component {
     private readonly palette: Palette,
     private readonly done: (selection: ModelDialogSelection) => void,
     private readonly cancel: () => void,
+    private readonly translator: Translator,
   ) {
     this.items = new Map()
     this.choices = new Map()
@@ -356,7 +378,7 @@ export class ModelDialog implements Component {
       displayText(choice.modelName),
       ...choice.description === undefined ? [] : [displayText(choice.description)],
       ...effortLabel === undefined ? [] : [displayText(effortLabel)],
-      ...isCurrent ? ['current'] : [],
+      ...isCurrent ? [this.translator.t('model.currentTag')] : [],
     ].join(' — ')
   }
 
@@ -417,14 +439,15 @@ export class ModelDialog implements Component {
     this.filter.focused = true
     const results = this.filteredItems()
     const filterContent = truncateToWidth(this.filter.render(innerWidth).join(''), innerWidth, '')
-    return renderDialog('Select model', [
+    const { t } = this.translator
+    return renderDialog(t('model.selectTitle'), [
       filterContent,
       '',
       ...results.length === 0
-        ? [this.palette.dim('  No models match the filter')]
+        ? [this.palette.dim(t('model.noMatch'))]
         : this.list.render(innerWidth),
       '',
-      this.palette.dim('type to filter • ↑/↓ move • Shift+Tab reasoning • Enter select • Esc'),
+      this.palette.dim(t('model.footer')),
     ], width, this.palette)
   }
 }
@@ -454,15 +477,29 @@ export class DetailsDialog implements Component {
     private readonly palette: Palette,
     private readonly apply: (selection: DetailsSelection) => void,
     private readonly close: () => void,
+    private readonly translator: Translator,
   ) {
-    this.toolsItem = { value: 'tools', label: 'Tool cards', description: visibility }
-    this.reasoningItem = { value: 'reasoning', label: 'Reasoning', description: this.reasoningLabel() }
+    this.toolsItem = {
+      value: 'tools',
+      label: this.translator.t('details.toolCards'),
+      description: this.visibilityLabel(visibility),
+    }
+    this.reasoningItem = {
+      value: 'reasoning',
+      label: this.translator.t('details.reasoning'),
+      description: this.reasoningLabel(),
+    }
     this.list = new SelectList([this.toolsItem, this.reasoningItem], 2, dialogSelectTheme(palette))
     this.list.onSelect = close
   }
 
   private reasoningLabel(): string {
-    return this.showReasoning ? 'shown' : 'hidden'
+    return this.translator.t(this.showReasoning ? 'common.shown' : 'common.hidden')
+  }
+
+  /** The localized label of one tool-card visibility phase. */
+  private visibilityLabel(visibility: ToolCardVisibility): string {
+    return this.translator.t(`details.phase.${visibility}`)
   }
 
   /** Cycle the highlighted entry one step and apply the new state. */
@@ -473,7 +510,7 @@ export class DetailsDialog implements Component {
     if (selected.value === 'tools') {
       const index = TOOL_CARD_PHASES.indexOf(this.visibility)
       this.visibility = TOOL_CARD_PHASES[(index + 1) % TOOL_CARD_PHASES.length] as ToolCardVisibility
-      this.toolsItem.description = this.visibility
+      this.toolsItem.description = this.visibilityLabel(this.visibility)
     } else {
       this.showReasoning = !this.showReasoning
       this.reasoningItem.description = this.reasoningLabel()
@@ -494,10 +531,10 @@ export class DetailsDialog implements Component {
 
   render(width: number): string[] {
     const innerWidth = Math.max(1, width - 4)
-    return renderDialog('Transcript details', [
+    return renderDialog(this.translator.t('details.title'), [
       ...this.list.render(innerWidth),
       '',
-      this.palette.dim('↑/↓ move • Tab toggle • Enter/Esc close'),
+      this.palette.dim(this.translator.t('details.footer')),
     ], width, this.palette)
   }
 }
@@ -512,7 +549,14 @@ export interface ResumeCandidate {
   currentWorkspace: boolean
   /** The session's own workspace as a prompt-style label; the all-workspaces scope shows it per row. */
   workspaceLabel: string
+  /** Rendered reason this session cannot be resumed here. */
   disabledReason?: string
+  /**
+   * Key behind {@link disabledReason}, when the reason is one this terminal
+   * owns. The picker compares against the key rather than the rendered text,
+   * so its own checks keep working in any locale.
+   */
+  disabledKey?: TranslationKey
   /**
    * Whether the registry's durable archive set hides this session from the
    * ordinary scopes. Archiving is the delete-without-data-loss path, so an
@@ -545,18 +589,20 @@ export function summarizeResumeCandidate(
   currentId: SessionId,
   cwd: string | undefined,
   formatWorkspace: (cwd: string | undefined) => string,
+  translator: Translator,
 ): ResumeCandidate {
-  let disabledReason: string | undefined
-  if (record.header.id === currentId) disabledReason = 'current session'
-  else if (record.live) disabledReason = 'session is already live in this runtime'
-  else if (record.header.cwd === undefined) disabledReason = 'session has no recorded workspace'
+  let disabledKey: TranslationKey | undefined
+  if (record.header.id === currentId) disabledKey = 'resume.disabled.current'
+  else if (record.live) disabledKey = 'resume.disabled.live'
+  else if (record.header.cwd === undefined) disabledKey = 'resume.disabled.noWorkspace'
   return {
     record,
-    title: title ?? 'Untitled session',
+    title: title ?? translator.t('resume.untitled'),
     lastActivityAt: lastActivityAt ?? record.header.createdAt,
     currentWorkspace: record.header.cwd === cwd,
     workspaceLabel: formatWorkspace(record.header.cwd),
-    ...disabledReason === undefined ? {} : { disabledReason },
+    ...disabledKey === undefined ? {} : { disabledReason: translator.t(disabledKey) },
+    ...disabledKey === undefined ? {} : { disabledKey },
   }
 }
 
@@ -605,6 +651,7 @@ export class ResumePicker implements Component, Focusable {
     private readonly palette: Palette,
     private readonly done: (candidate: ResumeCandidate) => void,
     private readonly cancel: () => void,
+    private readonly translator: Translator,
     /**
      * Archive (`archived: true`) or restore (`false`) one session and resolve
      * with the durable archive set. Optional: without it the picker hides the
@@ -701,15 +748,16 @@ export class ResumePicker implements Component, Focusable {
    * requests and reflects the outcome.
    */
   private toggleArchived(): void {
+    const { t } = this.translator
     if (this.setArchived === undefined) {
-      this.error = 'Archiving needs the workspace registry, which this composition does not mount.'
+      this.error = t('resume.error.noRegistry')
       return
     }
     if (this.busy) return
     const selected = this.filtered()[this.selectedIndex]
-    if (this.candidates === undefined) this.error = 'Sessions are still loading.'
-    else if (selected === undefined) this.error = 'No session matches this search.'
-    else if (selected.disabledReason === 'current session') this.error = 'The current session cannot be archived.'
+    if (this.candidates === undefined) this.error = t('resume.error.stillLoading')
+    else if (selected === undefined) this.error = t('resume.error.noMatch')
+    else if (selected.disabledKey === 'resume.disabled.current') this.error = t('resume.error.cannotArchiveCurrent')
     else {
       this.busy = true
       this.error = ''
@@ -780,7 +828,7 @@ export class ResumePicker implements Component, Focusable {
       return
     }
     if (matchesKey(data, Key.ctrl('n'))) {
-      if (this.startNew === undefined) this.error = 'Starting a fresh session in place needs the launcher host.'
+      if (this.startNew === undefined) this.error = this.translator.t('resume.error.newNeedsHost')
       else this.startNew()
       this.invalidate()
       return
@@ -813,10 +861,11 @@ export class ResumePicker implements Component, Focusable {
     } else if (matchesKey(data, Key.tab)) {
       this.cycleScope()
     } else if (matchesKey(data, Key.enter)) {
+      const { t } = this.translator
       const selected = filtered[this.selectedIndex]
-      if (this.candidates === undefined) this.error = 'Sessions are still loading.'
-      else if (this.scope === 'archived') this.error = 'Restore the session with Ctrl+D before resuming it.'
-      else if (selected === undefined) this.error = 'No session matches this search.'
+      if (this.candidates === undefined) this.error = t('resume.error.stillLoading')
+      else if (this.scope === 'archived') this.error = t('resume.error.restoreFirst')
+      else if (selected === undefined) this.error = t('resume.error.noMatch')
       else if (selected.disabledReason !== undefined) this.error = selected.disabledReason
       else this.done(selected)
     } else {
@@ -841,15 +890,18 @@ export class ResumePicker implements Component, Focusable {
     const unarchived = candidates.filter(candidate => candidate.archived !== true)
     const inWorkspace = unarchived.filter(candidate => candidate.currentWorkspace).length
     const archived = candidates.length - unarchived.length
+    const { t } = this.translator
     const labels: Record<ResumeScope, string> = {
-      workspace: `this workspace ${displayText(this.workspaceLabel)}`,
-      all: `all workspaces (${unarchived.length})`,
-      archived: `archived (${archived})`,
+      workspace: t('resume.scope.workspace', { label: displayText(this.workspaceLabel) }),
+      all: t('resume.scope.all', { count: unarchived.length }),
+      archived: t('resume.scope.archived', { count: archived }),
     }
     const active = labels[this.scope]
     const others = this.availableScopes()
       .filter(scope => scope !== this.scope)
-      .map(scope => scope === 'workspace' ? `this workspace (${inWorkspace})` : labels[scope])
+      .map(scope => scope === 'workspace'
+        ? t('resume.scope.workspaceCount', { count: inWorkspace })
+        : labels[scope])
     return `${this.palette.accent(active)}${this.palette.dim(`  ⇥ ${others.join('  ')}`)}`
   }
 
@@ -864,8 +916,8 @@ export class ResumePicker implements Component, Focusable {
     const selected = filtered[this.selectedIndex]
     const position = selected === undefined ? 0 : this.selectedIndex + 1
     const title = this.candidates === undefined
-      ? 'Resume session'
-      : `Resume session (${position} of ${filtered.length})`
+      ? this.translator.t('resume.title')
+      : this.translator.t('resume.titlePositioned', { position, total: filtered.length })
     const lines: string[] = [
       '',
       `${indent}${this.palette.bold(this.palette.accent(title))}`,
@@ -897,10 +949,10 @@ export class ResumePicker implements Component, Focusable {
       const candidate = filtered[index] as ResumeCandidate
       const active = index === this.selectedIndex
       const status = [
-        candidate.disabledReason === 'current session' ? 'current' : undefined,
-        candidate.record.live ? 'live' : undefined,
-        candidate.record.persisted ? 'persisted' : undefined,
-        candidate.archived === true ? 'archived' : undefined,
+        candidate.disabledKey === 'resume.disabled.current' ? this.translator.t('resume.state.current') : undefined,
+        candidate.record.live ? this.translator.t('resume.state.live') : undefined,
+        candidate.record.persisted ? this.translator.t('resume.state.persisted') : undefined,
+        candidate.archived === true ? this.translator.t('resume.state.archived') : undefined,
       ].filter((value): value is string => value !== undefined).join(' · ')
       const lead = `${active ? '❯' : ' '} ${displayText(candidate.title)}`
       push(active ? this.palette.bold(this.palette.accent(lead)) : lead)
@@ -908,43 +960,50 @@ export class ResumePicker implements Component, Focusable {
       // Only the non-workspace scopes mix directories, so the per-row workspace
       // is redundant in the scope that already names one.
       if (this.scope !== 'workspace') {
-        push(this.palette.dim(`  workspace ${displayText(candidate.workspaceLabel)}`))
+        push(this.palette.dim(`  ${this.translator.t('resume.row.workspace', {
+          label: displayText(candidate.workspaceLabel),
+        })}`))
       }
       if (candidate.disabledReason !== undefined) {
-        push(this.palette.warning(`  unavailable: ${displayText(candidate.disabledReason)}`))
+        push(this.palette.warning(`  ${this.translator.t('resume.row.unavailable', {
+          reason: displayText(candidate.disabledReason),
+        })}`))
       }
     }
-    if (this.candidates === undefined) push(this.palette.dim('Loading sessions…'))
+    if (this.candidates === undefined) push(this.palette.dim(this.translator.t('resume.loading')))
     else if (filtered.length === 0) {
-      push(this.palette.warning(this.scope === 'archived'
-        ? 'No archived sessions.'
-        : 'No matching sessions.'))
+      push(this.palette.warning(this.translator.t(this.scope === 'archived'
+        ? 'resume.noArchived'
+        : 'resume.noMatch')))
     }
     if (this.error !== '' && !this.busy) {
       lines.push('')
       push(this.palette.error(displayText(this.error)))
     }
 
+    const t = this.translator.t
     const controls = [
-      'Type to search',
-      '↑/↓ navigate',
-      'Tab scope',
-      this.scope === 'archived' ? 'Ctrl+D restore' : 'Ctrl+D archive',
-      'Ctrl+N new',
-      ...(this.scope === 'archived' ? [] : ['Enter resume']),
-      'Esc clear/cancel',
+      t('resume.control.search'),
+      t('resume.control.navigate'),
+      t('resume.control.scope'),
+      t(this.scope === 'archived' ? 'resume.control.restore' : 'resume.control.archive'),
+      t('resume.control.new'),
+      ...(this.scope === 'archived' ? [] : [t('resume.control.resume')]),
+      t('resume.control.cancel'),
     ]
     const full = controls.join('  •  ')
     const terse = [
-      ...(this.scope === 'archived' ? ['^D restore'] : ['^D archive']),
-      '^N new',
-      ...(this.scope === 'archived' ? [] : ['↵ resume']),
-      'Tab scope',
-      'Esc cancel',
+      ...(this.scope === 'archived' ? [t('resume.terse.restore')] : [t('resume.terse.archive')]),
+      t('resume.terse.new'),
+      ...(this.scope === 'archived' ? [] : [t('resume.terse.resume')]),
+      t('resume.terse.scope'),
+      t('resume.terse.cancel'),
     ].join('  •  ')
     const line = this.busy
-      ? 'Working…'
-      : visibleWidth(full) <= contentWidth ? full : visibleWidth(terse) <= contentWidth ? terse : '^D  ^N  Tab  ↵  Esc'
+      ? t('common.working')
+      : visibleWidth(full) <= contentWidth
+        ? full
+        : visibleWidth(terse) <= contentWidth ? terse : t('resume.control.minimal')
     const footer = `${indent}${this.palette.dim(line)}`
     while (lines.length < height - 2) lines.push('')
     lines.push(footer, '')
@@ -956,20 +1015,20 @@ export class ResumePicker implements Component, Focusable {
 export type ApprovalChoice = 'allowed-once' | 'rejected'
 
 interface ApprovalOption {
-  label: string
-  description: string
+  label: TranslationKey
+  description: TranslationKey
   choice: ApprovalChoice
 }
 
 const APPROVAL_OPTIONS: readonly ApprovalOption[] = [
   {
-    label: 'Allow once',
-    description: 'Run this one call; the next request asks again',
+    label: 'approval.allowOnce',
+    description: 'approval.allowOnceDesc',
     choice: 'allowed-once',
   },
   {
-    label: 'Reject',
-    description: 'Block this call; the model sees the rejection',
+    label: 'approval.reject',
+    description: 'approval.rejectDesc',
     choice: 'rejected',
   },
 ]
@@ -992,6 +1051,7 @@ export class ApprovalDialog implements Component, Focusable {
     private readonly palette: Palette,
     private readonly done: (choice: ApprovalChoice) => void,
     private readonly cancel: () => void,
+    private readonly translator: Translator,
   ) {}
 
   invalidate(): void {}
@@ -1011,11 +1071,12 @@ export class ApprovalDialog implements Component, Focusable {
     const innerWidth = Math.max(1, width - horizontalPadding * 2)
     const maxHeight = this.maxHeight()
 
+    const { t } = this.translator
     const optionLines = APPROVAL_OPTIONS
       .map((option, index) => this.renderOption(option, index, innerWidth))
       .flat()
     const footer = this.palette.dim(truncateToWidth(
-      '↑/↓ move • Enter confirm • Esc reject',
+      t('approval.footer'),
       innerWidth,
       '…',
     ))
@@ -1027,7 +1088,7 @@ export class ApprovalDialog implements Component, Focusable {
     const head: string[] = []
     if (capacity > 0) {
       head.push(truncateToWidth(
-        `${this.palette.bold(this.palette.accent('Approval required'))}${this.palette.dim(` · ${displayText(this.toolName)}`)}`,
+        `${this.palette.bold(this.palette.accent(t('approval.title')))}${this.palette.dim(` · ${displayText(this.toolName)}`)}`,
         innerWidth,
         '…',
       ))
@@ -1042,7 +1103,9 @@ export class ApprovalDialog implements Component, Focusable {
       if (shown.length < reasonLines.length) {
         const hidden = reasonLines.length - shown.length
         // The overflow marker may itself not fit; the reason's head is what matters.
-        if (head.length < capacity) head.push(this.palette.dim(`… ${hidden} more lines`))
+        if (head.length < capacity) {
+          head.push(this.palette.dim(t('question.moreLinesEllipsis', { count: hidden })))
+        }
       }
     }
     const detailRoom = capacity - head.length
@@ -1054,11 +1117,11 @@ export class ApprovalDialog implements Component, Focusable {
       // A preview is worth its heading only when it fits complete or can keep
       // at least one body line beside its overflow marker.
       if (detailLines.length <= bodyRoom || bodyRoom >= 2) {
-        head.push('', this.palette.dim('Arguments'))
+        head.push('', this.palette.dim(t('approval.arguments')))
         const keep = detailLines.length <= bodyRoom ? detailLines.length : bodyRoom - 1
         for (const line of detailLines.slice(0, keep)) head.push(this.palette.dim(line))
         if (keep < detailLines.length) {
-          head.push(this.palette.dim(`… ${detailLines.length - keep} more lines`))
+          head.push(this.palette.dim(t('question.moreLinesEllipsis', { count: detailLines.length - keep })))
         }
       }
     }
@@ -1068,9 +1131,9 @@ export class ApprovalDialog implements Component, Focusable {
       // Only a panel too short for its own decision surface reaches this: the
       // options and their controls outrank the explanation above them.
       rows = maxHeight === 1
-        ? [this.palette.dim(`↑ ${rows.length} lines hidden`)]
+        ? [this.palette.dim(t('approval.linesHidden', { count: rows.length }))]
         : [
-          this.palette.dim(`↑ ${rows.length - maxHeight + 1} lines hidden`),
+          this.palette.dim(t('approval.linesHidden', { count: rows.length - maxHeight + 1 })),
           ...rows.slice(-(maxHeight - 1)),
         ]
     }
@@ -1089,11 +1152,12 @@ export class ApprovalDialog implements Component, Focusable {
     const prefixWidth = visibleWidth(prefixPlain)
     const bodyWidth = Math.max(1, innerWidth - prefixWidth)
     const lines: string[] = []
-    for (const [lineIndex, labelLine] of wrapTextWithAnsi(displayText(option.label), bodyWidth).entries()) {
+    const { t } = this.translator
+    for (const [lineIndex, labelLine] of wrapTextWithAnsi(displayText(t(option.label)), bodyWidth).entries()) {
       const composed = `${lineIndex === 0 ? prefixPlain : ' '.repeat(prefixWidth)}${labelLine}`
       lines.push(index === this.selectedIndex ? this.palette.bold(this.palette.accent(composed)) : composed)
     }
-    for (const descLine of wrapTextWithAnsi(displayText(option.description), bodyWidth)) {
+    for (const descLine of wrapTextWithAnsi(displayText(t(option.description)), bodyWidth)) {
       lines.push(`${' '.repeat(prefixWidth)}${this.palette.dim(descLine)}`)
     }
     return lines
@@ -1129,6 +1193,7 @@ export class QuestionDialog implements Component, Focusable {
     private readonly palette: Palette,
     private readonly done: (selection: QuestionSelection) => void,
     private readonly cancel: () => void,
+    private readonly translator: Translator,
     mdTheme?: MarkdownTheme,
   ) {
     this.options = question.options ?? []
@@ -1192,7 +1257,7 @@ export class QuestionDialog implements Component, Focusable {
         : [options[this.selectedIndex]?.label].filter((label): label is string => label !== undefined)
       const custom = this.question.multiSelect ? this.input.getValue().trim() : ''
       if (selected.length === 0 && custom === '') {
-        this.error = 'Select at least one option, or press Tab for a custom answer.'
+        this.error = this.translator.t('question.selectOne')
         return
       }
       this.done({ selected, ...(custom === '' ? {} : { custom }) })
@@ -1208,7 +1273,7 @@ export class QuestionDialog implements Component, Focusable {
   private submitCustom(value: string): void {
     const custom = value.trim()
     if (custom === '') {
-      this.error = 'Enter an answer before submitting.'
+      this.error = this.translator.t('question.emptyAnswer')
       return
     }
     this.done({
@@ -1265,7 +1330,12 @@ export class QuestionDialog implements Component, Focusable {
     this.input.focused = this.focused
     const horizontalPadding = Math.min(2, Math.max(0, Math.floor((width - 1) / 2)))
     const innerWidth = Math.max(1, width - horizontalPadding * 2)
-    const header = `Question ${this.position}/${this.total} (${this.unanswered} unanswered)${this.question.header === undefined ? '' : ` · ${displayText(this.question.header)}`}`
+    const { t } = this.translator
+    const header = `${t('question.header', {
+      position: this.position,
+      total: this.total,
+      unanswered: this.unanswered,
+    })}${this.question.header === undefined ? '' : ` · ${displayText(this.question.header)}`}`
     const questionLines = wrapTextWithAnsi(
       this.palette.text(displayText(this.question.question)),
       innerWidth,
@@ -1275,7 +1345,7 @@ export class QuestionDialog implements Component, Focusable {
     // A plan review leads with its own title so the approval decision reads as
     // such at a glance, before the standard position meta.
     if (this.planReview) {
-      const title = this.palette.bold(this.palette.accent('Plan review'))
+      const title = this.palette.bold(this.palette.accent(t('question.planReview')))
       headerLines.push(truncateToWidth(title, innerWidth, '…'))
       contentLines.push(title)
     }
@@ -1301,9 +1371,11 @@ export class QuestionDialog implements Component, Focusable {
     headerLines.push('')
 
     const customControls = [
-      ...(this.options.length > 0 && this.question.multiSelect ? [`${this.selected.size} selected`] : []),
-      'Enter submit',
-      this.options.length > 0 ? 'Esc options' : 'Esc cancel',
+      ...(this.options.length > 0 && this.question.multiSelect
+        ? [t('question.selectedCount', { count: this.selected.size })]
+        : []),
+      t('question.enterSubmit'),
+      t(this.options.length > 0 ? 'question.escOptions' : 'question.escCancel'),
     ]
     const customHint = this.palette.dim(customControls.join(' • '))
     const footerLines: string[] = []
@@ -1312,11 +1384,11 @@ export class QuestionDialog implements Component, Focusable {
       for (const line of wrapTextWithAnsi(customHint, innerWidth)) footerLines.push(line)
     } else {
       const controls = [
-        'Tab custom answer',
-        ...(this.options.length > 1 ? ['↑/↓ navigate'] : []),
-        ...(this.question.multiSelect ? ['Space toggle'] : []),
-        'Enter submit',
-        'Esc interrupt',
+        t('question.tabCustom'),
+        ...(this.options.length > 1 ? [t('question.navigate')] : []),
+        ...(this.question.multiSelect ? [t('question.spaceToggle')] : []),
+        t('question.enterSubmit'),
+        t('question.escInterrupt'),
       ]
       const hint = this.palette.dim(controls.join(' • '))
       for (const line of wrapTextWithAnsi(hint, innerWidth)) footerLines.push(line)
@@ -1344,11 +1416,11 @@ export class QuestionDialog implements Component, Focusable {
     } else {
       const optionBlocks = this.options.map((option, index) => this.renderOptionBlock(option, index, innerWidth))
       const { visibleBlocks, hiddenBefore, hiddenAfter } = this.windowBlocks(optionBlocks, availableForOptions, innerWidth)
-      if (hiddenBefore > 0) optionLines.push(this.palette.dim(`↑ ${hiddenBefore} more`))
+      if (hiddenBefore > 0) optionLines.push(this.palette.dim(t('question.moreAbove', { count: hiddenBefore })))
       for (const block of visibleBlocks) {
         for (const line of block) optionLines.push(line)
       }
-      if (hiddenAfter > 0) optionLines.push(this.palette.dim(`↓ ${hiddenAfter} more`))
+      if (hiddenAfter > 0) optionLines.push(this.palette.dim(t('question.moreBelow', { count: hiddenAfter })))
       for (const line of optionLines) body.push(line)
       for (const line of positionLines) body.push(line)
       for (const line of footerLines) body.push(line)
@@ -1365,7 +1437,7 @@ export class QuestionDialog implements Component, Focusable {
       const compactFooter = [
         ...this.error === ''
           ? []
-          : [truncateToWidth(this.palette.error(`Error: ${this.error}`), innerWidth, '…')],
+          : [truncateToWidth(this.palette.error(t('question.errorPrefix', { error: this.error })), innerWidth, '…')],
         this.compactOptionControls(
           innerWidth,
           headerBudget === 1 && contentLines.length > headerBudget,
@@ -1399,9 +1471,9 @@ export class QuestionDialog implements Component, Focusable {
     }
     if (visibleRows.length > maxHeight) {
       visibleRows = maxHeight === 1
-        ? [this.palette.dim(`↑ ${visibleRows.length} lines hidden`)]
+        ? [this.palette.dim(t('question.linesHidden', { count: visibleRows.length }))]
         : [
-          this.palette.dim(`↑ ${visibleRows.length - maxHeight + 1} lines hidden`),
+          this.palette.dim(t('question.linesHidden', { count: visibleRows.length - maxHeight + 1 })),
           ...visibleRows.slice(-(maxHeight - 1)),
         ]
     }
@@ -1477,8 +1549,8 @@ export class QuestionDialog implements Component, Focusable {
 
   /** Keep Page Up / Page Down discoverable when a full pager status cannot fit. */
   private pagerStatus(first: number, last: number, total: number, innerWidth: number): string {
-    const full = `… lines ${first}-${last}/${total} • PgUp/PgDn`
-    const compact = `PgUp/PgDn ${first}/${total}`
+    const full = this.translator.t('question.pagerFull', { first, last, total })
+    const compact = this.translator.t('question.pagerCompact', { first, total })
     return this.palette.dim(truncateToWidth(
       visibleWidth(full) <= innerWidth ? full : compact,
       innerWidth,
@@ -1488,28 +1560,34 @@ export class QuestionDialog implements Component, Focusable {
 
   /** Render custom-mode controls on one row when the header must compact. */
   private compactCustomControls(innerWidth: number): string {
+    const t = this.translator.t
     const controls = this.options.length > 0
-      ? 'Enter submit • Esc options'
-      : 'Enter submit • Esc cancel'
-    const fallback = this.options.length > 0 ? '↵ Esc options' : 'Enter Esc cancel'
+      ? `${t('question.enterSubmit')} • ${t('question.escOptions')}`
+      : `${t('question.enterSubmit')} • ${t('question.escCancel')}`
+    const fallback = this.options.length > 0
+      ? `↵ ${t('question.escOptions')}`
+      : `${t('question.token.enter')} ${t('question.escCancel')}`
     const line = visibleWidth(controls) <= innerWidth ? controls : fallback
     return this.palette.dim(truncateToWidth(line, innerWidth, '…'))
   }
 
   /** Render a one-row option footer that retains every mode-specific control. */
   private compactOptionControls(innerWidth: number, showPager = false): string {
+    const t = this.translator.t
     const controls = [
-      ...(this.options.length > 1 ? ['↑/↓'] : []),
-      'Tab custom',
-      ...(this.question.multiSelect ? ['Space toggle'] : []),
-      'Enter',
-      'Esc interrupt',
-      ...(showPager ? ['PgUp/PgDn'] : []),
+      ...(this.options.length > 1 ? [t('question.token.upDown')] : []),
+      t('question.token.tabCustom'),
+      ...(this.question.multiSelect ? [t('question.spaceToggle')] : []),
+      t('question.token.enter'),
+      t('question.token.escInterrupt'),
+      ...(showPager ? [t('question.token.pager')] : []),
     ].join(' • ')
-    const optionNavigation = this.options.length > 1 ? '↑↓ ' : ''
+    const optionNavigation = this.options.length > 1 ? t('question.compact.nav') : ''
     const fallback = showPager
-      ? `P↑↓ ${optionNavigation}Tab${this.question.multiSelect ? ' S' : ''}↵Esc`
-      : this.question.multiSelect ? `${optionNavigation}Tab Sp ↵Esc` : `${optionNavigation}Tab ↵ Esc`
+      ? t('question.compact.pager', { nav: optionNavigation, multi: this.question.multiSelect === true })
+      : this.question.multiSelect
+        ? t('question.compact.multiSelect', { nav: optionNavigation })
+        : t('question.compact.single', { nav: optionNavigation })
     const line = visibleWidth(controls) <= innerWidth ? controls : fallback
     return this.palette.dim(truncateToWidth(line, innerWidth, '…'))
   }

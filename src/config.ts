@@ -11,6 +11,16 @@ import {
   DEFAULT_FILE_SEARCH_MAX_ENTRIES,
   DEFAULT_FILE_SEARCH_MAX_RESULTS,
 } from './chat/file-autocomplete.ts'
+import { DEFAULT_HISTORY_CAPACITY } from './chat/history.ts'
+import { DEFAULT_CURRENCY, type ModelPrice } from './chat/diagnostics.ts'
+import type { RenderMode } from './components/prose.ts'
+import {
+  LOCALE_IDS,
+  resolveLocale,
+  type LocaleId,
+  type LocaleSetting,
+} from './i18n/locale.ts'
+import { translate } from './i18n/translate.ts'
 
 /** Theme and prompt-template settings for the pi-tui terminal mode. */
 export interface TuiThemeConfig {
@@ -32,6 +42,11 @@ export interface TuiThemeConfig {
 export interface TuiConfig {
   /** Render model reasoning blocks. */
   showReasoning?: boolean
+  /**
+   * How transcript prose is presented. `rich` parses Markdown; `plain` renders
+   * the same text verbatim. Switchable at runtime with `/render`.
+   */
+  renderMode?: RenderMode
   /** Maximum tool-card body lines retained in its collapsed head/tail preview. */
   maxToolOutputLines?: number
   /** Maximum added and removed lines explored while deriving an exact line diff. */
@@ -44,6 +59,12 @@ export interface TuiConfig {
   maxResumeOptions?: number
   /** Maximum concurrent cold projection reads in one resume scan. */
   resumeScanConcurrency?: number
+  /** Retained prompt-history entries offered by Ctrl+R search. */
+  historySize?: number
+  /** Model price table `/cost` uses to estimate spend; absent reports tokens only. */
+  prices?: ModelPrice[]
+  /** Currency symbol prefixed to computed costs. */
+  currency?: string
   /** User-question panel width in terminal columns, clamped to the terminal. */
   questionDialogWidth?: number
   /** User-question panel maximum height in terminal rows. */
@@ -62,6 +83,12 @@ export interface TuiConfig {
   fileSearchExcludedDirectories?: string[]
   /** Show the terminal's hardware cursor at the pi editor's IME marker. */
   showHardwareCursor?: boolean
+  /**
+   * Interface language. `auto` (the default) follows the process environment's
+   * `LC_ALL`/`LC_MESSAGES`/`LANG`; an explicit id pins one shipped locale.
+   * Switchable at runtime with `/locale`.
+   */
+  locale?: LocaleSetting
   /** Color and prompt-template settings. */
   theme?: TuiThemeConfig
   /** Terminal window title while the UI is mounted; a logged session title prefixes it. */
@@ -69,12 +96,29 @@ export interface TuiConfig {
 }
 
 const showReasoningSchema = z.boolean().default(true)
+const renderModeSchema = z.union([z.const('rich'), z.const('plain')]).default('rich')
 const maxToolOutputLinesSchema = z.number().step(1).min(1).default(6)
 const maxDiffEditLengthSchema = z.number().step(1).min(1).default(1000)
 const maxQuestionOptionsSchema = z.number().step(1).min(1).default(8)
 const maxModelOptionsSchema = z.number().step(1).min(1).default(8)
 const maxResumeOptionsSchema = z.number().step(1).min(1).default(8)
 const resumeScanConcurrencySchema = z.number().step(1).min(1).default(4)
+const historySizeSchema = z.number().step(1).min(1).default(DEFAULT_HISTORY_CAPACITY)
+// A price entry matches a route when every field it names equals the route's;
+// an absent or `*` field matches anything, so `{ model: "*" }` is a fallback.
+// The two prices a cost estimate cannot do without are required here, matching
+// `ModelPrice`: schemastery leaves object fields optional by default, so without
+// this a `{ model: "*" }` row would validate and then fail in `/cost`.
+const priceSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  input: z.number().min(0).required(),
+  output: z.number().min(0).required(),
+  cacheRead: z.number().min(0),
+  cacheWrite: z.number().min(0),
+})
+const pricesSchema = z.array(priceSchema).default([])
+const currencySchema = z.string().default(DEFAULT_CURRENCY)
 const questionDialogWidthSchema = z.number().step(1).min(20).default(200)
 const questionDialogMaxHeightSchema = z.number().step(1).min(6).default(20)
 const modelDialogWidthSchema = z.number().step(1).min(20).default(76)
@@ -84,31 +128,43 @@ const fileSearchMaxResultsSchema = z.number().step(1).min(1).default(DEFAULT_FIL
 const fileSearchMaxEntriesSchema = z.number().step(1).min(1).default(DEFAULT_FILE_SEARCH_MAX_ENTRIES)
 const fileSearchExcludedDirectoriesSchema = z.array(z.string()).default([...DEFAULT_FILE_SEARCH_EXCLUDED_DIRECTORIES])
 const showHardwareCursorSchema = z.boolean().default(false)
+// `auto` is the default so a deployment that never names a language still
+// follows the user's environment, the way coreutils and git do.
+const localeSchema = z.union([
+  z.const('auto'),
+  ...LOCALE_IDS.map(id => z.const(id)),
+]).default('auto')
 const colorSchema = z.boolean().default(true)
 // No default: an unset value auto-detects truecolor from COLORTERM in `apply`.
 const truecolorSchema = z.boolean()
-const DEFAULT_LEFT_PROMPT = '${cwd}${git/worktree}${model}${token_meter/cache_hit_rate}${context}'
+const DEFAULT_LEFT_PROMPT = '${cwd}${git/worktree}${model}${reasoning}${token_meter/cache_hit_rate}${throughput}${context}'
 const DEFAULT_RIGHT_PROMPT = '${queued}'
 const DEFAULT_INPUT_PROMPT = '${symbol} ${indicator}'
-const DEFAULT_INPUT_PLACEHOLDER = 'press enter to steer and esc to cancel'
+// No schema default: the placeholder's default text follows the interface
+// language, so it is filled in by `resolveTuiConfig` after the locale resolves.
+const inputPlaceholderSchema = z.string()
 const TuiThemeConfigSchema: z<TuiThemeConfig> = z.object({
   color: colorSchema,
   truecolor: truecolorSchema,
   leftPrompt: z.string().default(DEFAULT_LEFT_PROMPT),
   rightPrompt: z.string().default(DEFAULT_RIGHT_PROMPT),
   inputPrompt: z.string().default(DEFAULT_INPUT_PROMPT),
-  inputPlaceholder: z.string().default(DEFAULT_INPUT_PLACEHOLDER),
+  inputPlaceholder: inputPlaceholderSchema,
 })
 const titleSchema = z.string().default('DeepSeek Harness')
 
 const tuiConfigSchemaFields = {
   showReasoning: showReasoningSchema,
+  renderMode: renderModeSchema,
   maxToolOutputLines: maxToolOutputLinesSchema,
   maxDiffEditLength: maxDiffEditLengthSchema,
   maxQuestionOptions: maxQuestionOptionsSchema,
   maxModelOptions: maxModelOptionsSchema,
   maxResumeOptions: maxResumeOptionsSchema,
   resumeScanConcurrency: resumeScanConcurrencySchema,
+  historySize: historySizeSchema,
+  prices: pricesSchema,
+  currency: currencySchema,
   questionDialogWidth: questionDialogWidthSchema,
   questionDialogMaxHeight: questionDialogMaxHeightSchema,
   modelDialogWidth: modelDialogWidthSchema,
@@ -118,6 +174,7 @@ const tuiConfigSchemaFields = {
   fileSearchMaxEntries: fileSearchMaxEntriesSchema,
   fileSearchExcludedDirectories: fileSearchExcludedDirectoriesSchema,
   showHardwareCursor: showHardwareCursorSchema,
+  locale: localeSchema,
   theme: TuiThemeConfigSchema,
   title: titleSchema,
 }
@@ -146,11 +203,15 @@ export const Config: z<Config> = z.object({
   sessionId: z.string().default('main'),
   initialSkill: z.string(),
   showReasoning: tuiConfigSchemaFields.showReasoning,
+  renderMode: tuiConfigSchemaFields.renderMode,
   maxToolOutputLines: tuiConfigSchemaFields.maxToolOutputLines,
   maxDiffEditLength: tuiConfigSchemaFields.maxDiffEditLength,
   maxQuestionOptions: tuiConfigSchemaFields.maxQuestionOptions,
   maxModelOptions: tuiConfigSchemaFields.maxModelOptions,
   maxResumeOptions: tuiConfigSchemaFields.maxResumeOptions,
+  historySize: tuiConfigSchemaFields.historySize,
+  prices: tuiConfigSchemaFields.prices,
+  currency: tuiConfigSchemaFields.currency,
   questionDialogWidth: tuiConfigSchemaFields.questionDialogWidth,
   questionDialogMaxHeight: tuiConfigSchemaFields.questionDialogMaxHeight,
   modelDialogWidth: tuiConfigSchemaFields.modelDialogWidth,
@@ -160,6 +221,7 @@ export const Config: z<Config> = z.object({
   fileSearchMaxEntries: tuiConfigSchemaFields.fileSearchMaxEntries,
   fileSearchExcludedDirectories: tuiConfigSchemaFields.fileSearchExcludedDirectories,
   showHardwareCursor: tuiConfigSchemaFields.showHardwareCursor,
+  locale: tuiConfigSchemaFields.locale,
   theme: tuiConfigSchemaFields.theme,
   title: tuiConfigSchemaFields.title,
 })
@@ -177,12 +239,16 @@ export interface ResolvedTuiThemeConfig {
 /** Fully defaulted TUI presentation settings. */
 export interface ResolvedTuiConfig {
   showReasoning: boolean
+  renderMode: RenderMode
   maxToolOutputLines: number
   maxDiffEditLength: number
   maxQuestionOptions: number
   maxModelOptions: number
   maxResumeOptions: number
   resumeScanConcurrency: number
+  historySize: number
+  prices: ModelPrice[]
+  currency: string
   questionDialogWidth: number
   questionDialogMaxHeight: number
   modelDialogWidth: number
@@ -192,6 +258,8 @@ export interface ResolvedTuiConfig {
   fileSearchMaxEntries: number
   fileSearchExcludedDirectories: string[]
   showHardwareCursor: boolean
+  /** Locale that actually renders, with `auto` already resolved from the environment. */
+  locale: LocaleId
   theme: ResolvedTuiThemeConfig
   title: string
 }
@@ -200,17 +268,27 @@ export interface ResolvedTuiConfig {
  * Apply direct-call defaults after Loader schema validation has normally run.
  *
  * @param config - Deployment-provided terminal presentation settings.
+ * @param env - Environment read when `locale` is `auto`; injectable so a caller
+ *   (or a test) can pin the interface language without touching the process.
  * @returns Complete settings consumed by the TUI renderer.
  */
-export function resolveTuiConfig(config: TuiConfig | undefined): ResolvedTuiConfig {
+export function resolveTuiConfig(
+  config: TuiConfig | undefined,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): ResolvedTuiConfig {
+  const locale = resolveLocale(config?.locale, env)
   return {
     showReasoning: config?.showReasoning ?? true,
+    renderMode: config?.renderMode ?? 'rich',
     maxToolOutputLines: config?.maxToolOutputLines ?? 6,
     maxDiffEditLength: config?.maxDiffEditLength ?? 1000,
     maxQuestionOptions: config?.maxQuestionOptions ?? 8,
     maxModelOptions: config?.maxModelOptions ?? 8,
     maxResumeOptions: config?.maxResumeOptions ?? 8,
     resumeScanConcurrency: config?.resumeScanConcurrency ?? 4,
+    historySize: config?.historySize ?? DEFAULT_HISTORY_CAPACITY,
+    prices: [...(config?.prices ?? [])],
+    currency: config?.currency ?? DEFAULT_CURRENCY,
     questionDialogWidth: config?.questionDialogWidth ?? 200,
     questionDialogMaxHeight: config?.questionDialogMaxHeight ?? 20,
     modelDialogWidth: config?.modelDialogWidth ?? 76,
@@ -220,13 +298,14 @@ export function resolveTuiConfig(config: TuiConfig | undefined): ResolvedTuiConf
     fileSearchMaxEntries: config?.fileSearchMaxEntries ?? DEFAULT_FILE_SEARCH_MAX_ENTRIES,
     fileSearchExcludedDirectories: [...(config?.fileSearchExcludedDirectories ?? DEFAULT_FILE_SEARCH_EXCLUDED_DIRECTORIES)],
     showHardwareCursor: config?.showHardwareCursor ?? false,
+    locale,
     theme: {
       color: config?.theme?.color ?? true,
       truecolor: config?.theme?.truecolor ?? false,
       leftPrompt: config?.theme?.leftPrompt ?? DEFAULT_LEFT_PROMPT,
       rightPrompt: config?.theme?.rightPrompt ?? DEFAULT_RIGHT_PROMPT,
       inputPrompt: config?.theme?.inputPrompt ?? DEFAULT_INPUT_PROMPT,
-      inputPlaceholder: config?.theme?.inputPlaceholder ?? DEFAULT_INPUT_PLACEHOLDER,
+      inputPlaceholder: config?.theme?.inputPlaceholder ?? translate(locale, 'prompt.inputPlaceholder'),
     },
     title: config?.title ?? 'DeepSeek Harness',
   }

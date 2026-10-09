@@ -239,6 +239,9 @@ export async function createTuiTestHarness<TerminalType extends Terminal, Exit e
   const controller = createTuiChat(ctx, Object.assign({
     ...options.omitWelcome === true ? {} : { welcome: 'Coding agent ready.' },
     sessionId,
+    // Pin the language: the product default follows the process environment,
+    // which would make every assertion depend on the developer's LANG.
+    locale: 'en',
     theme: { color: false },
   }, options.config), {
     terminal,

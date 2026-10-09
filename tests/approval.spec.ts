@@ -1,7 +1,7 @@
 /** Approval answerer: FIFO prompt ownership, fail-closed settlement, and the dialog surface. */
 
 import { Context } from '@deepseek-ai/cordis'
-import { ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ApprovalRequestEvent } from '@deepseek-ai/dsh-user-approval/types'
@@ -11,8 +11,9 @@ import { ApprovalDialog } from '../src/components/dialogs.ts'
 import { createPalette } from '../src/components/theme.ts'
 import { createApprovalQueue } from '../src/chat/approval.ts'
 import { TuiOverlayManager, type TuiOverlayDriver } from '../src/extension/overlay-manager.ts'
-import type { TuiOverlayOptions, TuiOverlayRequest } from '../src/extension/types.ts'
+import type { TuiOverlayOptions } from '../src/extension/types.ts'
 import { resolveTuiConfig } from '../src/config.ts'
+import { createTranslator } from '../src/i18n/translate.ts'
 
 /** One modal the stub driver mounted, with the component and its close handle. */
 interface MountedModal {
@@ -74,6 +75,7 @@ function createFixture(options: {
     resolved: resolveTuiConfig(undefined),
     palette: createPalette(false),
     overlayManager,
+    translator: createTranslator('en'),
     requestRender: () => {},
     isDisposed: () => options.disposed === true,
     approvalMaxHeight: options.approvalMaxHeight ?? (() => 12),
@@ -247,6 +249,8 @@ describe('approval queue', () => {
   })
 })
 
+const translator = createTranslator('en')
+
 describe('approval dialog surface', () => {
   it('renders inside the configured panel width and row budget', () => {
     const dialog = new ApprovalDialog(
@@ -257,6 +261,7 @@ describe('approval dialog surface', () => {
       createPalette(false),
       () => {},
       () => {},
+      translator,
     )
     const lines = dialog.render(60)
     expect(lines.length).toBeLessThanOrEqual(10)
@@ -275,6 +280,7 @@ describe('approval dialog surface', () => {
       createPalette(false),
       () => {},
       () => {},
+      translator,
     )
     const rendered = dialog.render(72).join('\n')
     expect(rendered).toContain('Writes outside the workspace')
@@ -292,6 +298,7 @@ describe('approval dialog surface', () => {
       createPalette(false),
       () => {},
       () => {},
+      translator,
     )
     const rendered = dialog.render(72).join('\n')
     expect(rendered).toContain('Writes outside the workspace')
@@ -301,7 +308,7 @@ describe('approval dialog surface', () => {
 
   it('ignores unrelated keys and keeps the highlighted option selectable', () => {
     const done = vi.fn()
-    const dialog = new ApprovalDialog('bash', undefined, undefined, () => 12, createPalette(false), done, () => {})
+    const dialog = new ApprovalDialog('bash', undefined, undefined, () => 12, createPalette(false), done, () => {}, translator)
     dialog.render(40)
     dialog.handleInput('q')
     expect(done).not.toHaveBeenCalled()

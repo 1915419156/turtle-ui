@@ -10,6 +10,7 @@ import { expandAssistantStream } from '@deepseek-ai/dsh-llm'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Palette } from '../components/theme.ts'
+import type { Translator, TranslationKey } from '../i18n/translate.ts'
 
 /**
  * Render cadence of the status prompt while active, and while the glyph fades
@@ -68,12 +69,12 @@ interface TimingState {
   active: { bucket: TimingBucket; since: number } | undefined
 }
 
-const TIMING_BUCKET_LABELS: Record<TimingBucket, string> = {
-  ttft: 'Model wait',
-  thinking: 'Thinking',
-  responding: 'Response',
-  tools: 'Tools',
-}
+const TIMING_BUCKET_KEYS = {
+  ttft: 'timing.modelWait',
+  thinking: 'timing.thinking',
+  responding: 'timing.responding',
+  tools: 'timing.tools',
+} as const satisfies Record<TimingBucket, TranslationKey>
 
 const TIMING_BUCKETS: readonly TimingBucket[] = ['ttft', 'thinking', 'responding', 'tools']
 
@@ -367,23 +368,25 @@ export function formatStatusDuration(elapsedMs: number): string {
 /**
  * Format the non-zero timing buckets of one step as a middot-joined summary.
  * @param totals - Per-phase totals to format.
+ * @param t - Translator supplying the phase labels.
  * @param includeModelWait - Whether to always include the model-wait bucket.
  * @returns The formatted timing summary.
  */
-export function formatTimingTotals(totals: TimingTotals, includeModelWait = false): string {
+export function formatTimingTotals(totals: TimingTotals, t: Translator['t'], includeModelWait = false): string {
   return TIMING_BUCKETS
     .filter(bucket => totals[bucket] > 0 || (includeModelWait && bucket === 'ttft'))
-    .map(bucket => `${TIMING_BUCKET_LABELS[bucket]} ${formatStatusDuration(totals[bucket])}`)
+    .map(bucket => `${t(TIMING_BUCKET_KEYS[bucket])} ${formatStatusDuration(totals[bucket])}`)
     .join(' · ')
 }
 
 /**
  * Format the queued-steering badge shown on the running status line.
  * @param queued - Number of queued steering messages.
+ * @param t - Translator supplying the badge text.
  * @returns The badge text, or `undefined` when nothing is queued.
  */
-export function formatQueuedStatus(queued: number): string | undefined {
-  return queued > 0 ? `${queued} queued` : undefined
+export function formatQueuedStatus(queued: number, t: Translator['t']): string | undefined {
+  return queued > 0 ? t('prompt.queued', { count: queued }) : undefined
 }
 
 /**

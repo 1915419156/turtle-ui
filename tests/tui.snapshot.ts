@@ -68,6 +68,14 @@ const CHECKPOINTS = [
   'model-selector',
   'model-selector-filtered',
   'model-switching',
+  'doctor-report',
+  'zh-conversation',
+  'cost-report',
+  'mcp-tools',
+  'history-search',
+  'rewind-picker',
+  'aside-streaming',
+  'aside-answer',
   'errors-and-help',
   'disposed-terminal',
   'resume-sessions-loading',
@@ -91,7 +99,7 @@ const observedCheckpoints = new Set<Checkpoint>()
 async function checkpoint(
   name: Checkpoint,
   terminal: HeadlessTerminal,
-  options: TerminalSnapshotOptions = {},
+  options: TerminalSnapshotOptions & { normalize?: (snapshot: string) => string } = {},
   bannerGradient = false,
 ): Promise<void> {
   observedCheckpoints.add(name)
@@ -109,13 +117,33 @@ async function checkpoint(
   } else {
     expect(violations, `${name} must remain theme-agnostic`).toEqual([])
   }
-  const snapshot = await terminal.snapshot(options)
+  const { normalize, ...snapshotOptions } = options
+  const rendered = await terminal.snapshot(snapshotOptions)
+  const snapshot = normalize === undefined ? rendered : normalize(rendered)
   const path = join(SNAPSHOTS_DIR, `${name}.expected.txt`)
   if (REFRESHING) {
     await mkdir(SNAPSHOTS_DIR, { recursive: true })
     await writeFile(path, snapshot)
   }
   await expect(snapshot).toMatchFileSnapshot(path)
+}
+
+/**
+ * Replace a doctor card row's value with a fixed placeholder, keeping the label,
+ * the row's right padding, and the closing border column in place. The doctor
+ * reports the machine it runs on, so the snapshot pins the card's composition —
+ * which rows exist and how the two columns lay out — while the values stay the
+ * running host's. The placeholder is padded to the value's own width so the row
+ * renders identically apart from the substituted text.
+ */
+function normalizeEnvironmentRow(snapshot: string, label: string, placeholder: string): string {
+  const pattern = new RegExp(`(${label}:\\s+)(.*?)(\\s*│)`, 'u')
+  return snapshot.replace(pattern, (_match, prefix: string, value: string, tail: string) => {
+    const padded = placeholder.length >= value.length
+      ? placeholder
+      : placeholder + ' '.repeat(value.length - placeholder.length)
+    return `${prefix}${padded}${tail}`
+  })
 }
 
 async function setupSnapshot(
@@ -129,6 +157,7 @@ async function setupSnapshot(
     cwd: options.cwd === undefined ? '/workspace/project' : options.cwd,
     config: Object.assign({
       welcome: 'Snapshot agent ready.',
+      locale: 'en',
       theme: { color: true },
       title: 'DSH snapshot',
     }, options.config),
@@ -1181,6 +1210,209 @@ describe('TUI terminal-state snapshots', () => {
     await checkpoint('status-diagnostics-narrow', harness.terminal, { includeScrollback: true })
     await disposeSnapshot(harness)
     dateNow.mockRestore()
+  })
+
+  it('pins the doctor self-check card', async () => {
+    const dateNow = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-07-22T09:10:11.000Z'))
+    const harness = await setupSnapshot({
+      contextWindow: 128_000,
+      contextTokens: 42_000,
+      agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+      config: { prices: [{ model: 'deepseek-v4-pro', input: 0.55, output: 2.19 }] },
+    }, { columns: 92, rows: 40 })
+    await renderAfter(harness, () => {
+      appendUser(harness.session, 'self-check')
+      appendAssistant(harness.session, [{ type: 'text', text: 'Checked.' }], {
+        inputTokens: 1_250,
+        outputTokens: 340,
+        cacheReadTokens: 3_000,
+      })
+      harness.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    })
+    await renderAfter(harness, () => {
+      harness.terminal.send('/doctor')
+      harness.terminal.send('\r')
+    })
+    await checkpoint('doctor-report', harness.terminal, {
+      includeScrollback: true,
+      // Every machine-dependent row, normalized to a placeholder. The optional
+      // services and the launcher keys read "not mounted" here by construction:
+      // the test harness mounts no workspace registry, no loader, and no host.
+      normalize: (snapshot) => ([
+        ['Node', '<version>'],
+        ['Platform', '<platform>'],
+        ['CPU', '<n> cores'],
+        ['Memory', '<used> / <total> used'],
+        ['Terminal', 'pid <pid>'],
+        // The default harness workspace does not exist, so `statfs` fails and
+        // the row is omitted entirely; the omission is what gets pinned.
+        ['Disk \\(workspace\\)', '<used> / <total> used (<free> free)'],
+      ] as const).reduce(
+        (text, [label, placeholder]) => normalizeEnvironmentRow(text, label, placeholder),
+        snapshot,
+      ),
+    })
+    await disposeSnapshot(harness)
+    dateNow.mockRestore()
+  })
+
+  it('pins the cost card and its JSON form', async () => {
+    const harness = await setupSnapshot({
+      agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+      config: {
+        prices: [{ model: 'deepseek-v4-pro', input: 0.55, output: 2.19, cacheRead: 0.07 }],
+        currency: '$',
+      },
+    }, { columns: 92, rows: 36 })
+    await renderAfter(harness, () => {
+      appendUser(harness.session, 'bill this')
+      appendAssistant(harness.session, [{ type: 'text', text: 'Billed.' }], {
+        inputTokens: 1_250,
+        outputTokens: 340,
+        cacheReadTokens: 3_000,
+        cacheWriteTokens: 250,
+      })
+    })
+    await renderAfter(harness, () => {
+      harness.terminal.send('/cost')
+      harness.terminal.send('\r')
+    })
+    await checkpoint('cost-report', harness.terminal, { includeScrollback: true })
+    await disposeSnapshot(harness)
+  })
+
+  it('pins the MCP server inventory grouped by namespace', async () => {
+    const mcpTool = (name: string, description: string): ToolDefinition => ({
+      name,
+      description,
+      parameters: { type: 'object', properties: {} },
+      output: { schema: { type: 'null' }, render: () => [] },
+      execute: async () => null,
+    })
+    const harness = await setupSnapshot({
+      tools: {
+        'mcp__files__read': mcpTool('mcp__files__read', 'Read a file from the MCP filesystem server'),
+        'mcp__files__write': mcpTool('mcp__files__write', 'Write a file through the MCP filesystem server'),
+        'mcp__git__status': mcpTool('mcp__git__status', 'Show the working tree status'),
+      },
+    }, { columns: 92, rows: 30 })
+    await renderAfter(harness, () => {
+      harness.terminal.send('/mcp')
+      harness.terminal.send('\r')
+    })
+    await checkpoint('mcp-tools', harness.terminal, { includeScrollback: true })
+    await disposeSnapshot(harness)
+  })
+
+  it('pins a Chinese session, including CJK cell widths', async () => {
+    // CJK glyphs occupy two terminal cells, so wrapping, truncation, and the
+    // dialog borders all measure differently than in English. Pinning the
+    // rendered frame is how a width regression in the translated layout shows
+    // up rather than being reasoned about.
+    const harness = await setupSnapshot({ config: { locale: 'zh' } }, { columns: 92, rows: 32 })
+    await renderAfter(harness, () => {
+      appendUser(harness.session, '把吞吐率改成按路由学习')
+      appendAssistant(harness.session, [{ type: 'text', text: '已经改成按路由学习，并在状态行显示实时速率。' }], {
+        inputTokens: 1_250,
+        outputTokens: 340,
+      })
+    })
+    await renderAfter(harness, () => {
+      harness.terminal.send('/help')
+      harness.terminal.send('\r')
+    })
+    await checkpoint('zh-conversation', harness.terminal, { includeScrollback: true })
+    await disposeSnapshot(harness)
+  })
+
+  it('pins the searchable prompt-history panel', async () => {
+    const dateNow = vi.spyOn(Date, 'now').mockReturnValue(new Date(2026, 6, 30, 18, 0, 0).getTime())
+    const harness = await setupSnapshot({}, { columns: 96, rows: 30 })
+    await renderAfter(harness, () => {
+      appendUser(harness.session, 'Refactor the throughput tracker so the ratio is learned per route.')
+      appendAssistant(harness.session, [{ type: 'text', text: 'Done.' }])
+    })
+    // Entries come from submissions, so the panel lists what was actually
+    // typed. Submitting a prompt with an idle agent only queues it on the agent
+    // — no transcript change, so no frame — which is why the prompts are typed
+    // without waiting and one rendering action follows them.
+    for (const prompt of [
+      'Refactor the throughput tracker so the ratio is learned per route.',
+      'Add a session export command',
+      'audit the fork path for zombie agents',
+    ]) {
+      harness.terminal.send(prompt)
+      harness.terminal.send('\r')
+    }
+    await renderAfter(harness, () => {
+      harness.terminal.send('\x12')
+    })
+    await checkpoint('history-search', harness.terminal, { includeScrollback: true })
+    await disposeSnapshot(harness)
+    dateNow.mockRestore()
+  })
+
+  it('pins the rewind/fork picker over a finished session', async () => {
+    const dateNow = vi.spyOn(Date, 'now').mockReturnValue(new Date(2026, 6, 30, 18, 0, 0).getTime())
+    const harness = await setupSnapshot({
+      // The picker refuses to open without a host handoff; this suite only
+      // renders it, so the handoff never runs.
+      handoffResume: vi.fn(async () => { throw new Error('not part of this snapshot') }),
+    }, { columns: 100, rows: 32 })
+    await renderAfter(harness, () => {
+      appendUser(harness.session, 'Add the rewind picker')
+      appendAssistant(harness.session, [{ type: 'text', text: 'Picker added.' }])
+      harness.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      harness.session.append('turn/start', { turn: 2 })
+      appendUser(harness.session, 'Make the rows readable')
+      appendAssistant(harness.session, [{ type: 'text', text: 'Rows labelled.' }])
+      harness.session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+    })
+    await renderAfter(harness, () => {
+      harness.terminal.send('/rewind')
+      harness.terminal.send('\r')
+    })
+    await checkpoint('rewind-picker', harness.terminal, { includeScrollback: true })
+    await disposeSnapshot(harness)
+    dateNow.mockRestore()
+  })
+
+  it('pins a side-question card while its answer streams and once it settles', async () => {
+    const release = Promise.withResolvers<void>()
+    const harness = await setupSnapshot({
+      configureContext: async (ctx) => {
+        await ctx.plugin(SystemPrompt)
+        await ctx.plugin(ToolRegistry)
+        ctx.provide('llm', {
+          listProviders: () => [],
+          listModels: () => Promise.resolve([]),
+          resolveModelInfo: (provider: string, model: string) =>
+            Promise.resolve({ provider, id: model, name: model }),
+          async *stream() {
+            yield { type: 'reasoning-delta', index: 0, text: 'The card holds its own accumulator.' }
+            yield { type: 'text-delta', index: 1, text: 'The answer streams ' }
+            yield { type: 'text-delta', index: 1, text: 'into the transcript card' }
+            // Hold the request open so the mid-stream frame is observable, then
+            // deliver the closing sentence the settled frame pins.
+            await release.promise
+            yield { type: 'text-delta', index: 1, text: ', outside the session log.' }
+          },
+        } as never)
+      },
+    }, { columns: 96, rows: 30 })
+    await renderAfter(harness, () => {
+      harness.terminal.send('/btw where does the answer go?')
+      harness.terminal.send('\r')
+    })
+    await checkpoint('aside-streaming', harness.terminal, { includeScrollback: true })
+    // Settling re-applies the same text the deltas already produced, so the
+    // differential renderer writes no new frame; the settle is awaited by time
+    // and an explicit flush instead of by frame boundary.
+    release.resolve()
+    await new Promise(resolve => setTimeout(resolve, 60))
+    await harness.terminal.flush()
+    await checkpoint('aside-answer', harness.terminal, { includeScrollback: true })
+    await disposeSnapshot(harness)
   })
 })
 

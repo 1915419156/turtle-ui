@@ -88,7 +88,7 @@ export interface RoleSpec {
  *
  * Only the standard 16-color set and SGR attributes appear here. Terminals remap
  * those to the user's active theme, so the TUI stays legible on any background;
- * a fixed 24-bit color would not. The startup gradient and exact official mark
+ * a fixed 24-bit color would not. The banner gradient and exact official mark
  * color are the two deliberate brand exceptions ({@link gradientText},
  * {@link brandText}).
  *

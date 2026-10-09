@@ -4,12 +4,14 @@ import { createToolResultMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { ContextCardComponent, ToolCardComponent } from '../src/components/transcript.ts'
 import { parseArguments } from '../src/components/content.ts'
 import { createPalette, markdownTheme } from '../src/components/theme.ts'
+import { createTranslator } from '../src/i18n/translate.ts'
 
 const palette = createPalette(false)
 const mdTheme = markdownTheme(palette)
+const translator = createTranslator('en')
 
 function toolCard(): ToolCardComponent {
-  return new ToolCardComponent('bash', parseArguments('{"command":"ls"}'), undefined, 10, 2_000, palette, mdTheme)
+  return new ToolCardComponent('bash', parseArguments('{"command":"ls"}'), undefined, 10, 2_000, palette, mdTheme, 'rich', translator)
 }
 
 function toolResult(text: string): Extract<SessionEvent, { type: 'tool/result' }>['data'] {
@@ -54,7 +56,7 @@ describe('transcript card render caches', () => {
   })
 
   it('context card: caches by width and drops on setExpanded and invalidate()', () => {
-    const card = new ContextCardComponent('workspace-context', 'line one\nline two', 10, palette)
+    const card = new ContextCardComponent('workspace-context', 'line one\nline two', 10, palette, 'rich', translator)
     const first = card.render(80)
     expect(card.render(80)).toBe(first)
 

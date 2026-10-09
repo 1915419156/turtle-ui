@@ -12,6 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { TuiOverlayManager } from '../extension/overlay-manager.ts'
 import type { Palette } from '../components/theme.ts'
 import type { ResolvedTuiConfig } from '../config.ts'
+import type { Translator } from '../i18n/translate.ts'
 
 /** Collaborators shared by every chat-channel sub-controller. */
 export interface ChatChannelDeps {
@@ -19,6 +20,8 @@ export interface ChatChannelDeps {
   readonly resolved: ResolvedTuiConfig
   readonly palette: Palette
   readonly overlayManager: TuiOverlayManager
+  /** Locale-bound translator every controller renders its copy through. */
+  readonly translator: Translator
   /** Redraw the channel. */
   requestRender(): void
   /** Whether the channel has begun shutting down. */
